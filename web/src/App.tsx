@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   LayoutDashboard, Coins, Router, MapPin, Users, Receipt, BarChart3,
   Settings, LogOut, Plus, RefreshCw, Search, Wallet, Building2, CalendarDays,
-  CheckCircle2, XCircle
+  CheckCircle2, XCircle, Download, GitBranch, ArrowUpCircle, ShieldCheck, KeyRound, Edit, Trash2
 } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 
@@ -41,6 +41,19 @@ export default function App() {
   const [form, setForm] = useState<any>({});
   const [search, setSearch] = useState("");
 
+  // Reports state
+  const [reportFrom, setReportFrom] = useState(new Date(new Date().getFullYear(), new Date().getMonth(), 1).toISOString().slice(0, 10));
+  const [reportTo, setReportTo] = useState(new Date().toISOString().slice(0, 10));
+  const [detailedReport, setDetailedReport] = useState<any>(null);
+
+  // System updates state
+  const [systemVersion, setSystemVersion] = useState<any>(null);
+  const [updateStatus, setUpdateStatus] = useState<any>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+
+  // Expense filter
+  const [expenseFilter, setExpenseFilter] = useState("ALL");
+
   const isFinance = user?.role === "SUPER_ADMIN" || user?.role === "ADMIN" || user?.role === "FINANCE";
   const isAdmin = user?.role === "SUPER_ADMIN" || user?.role === "ADMIN";
 
@@ -73,7 +86,7 @@ export default function App() {
       const isFin = me.role === "SUPER_ADMIN" || me.role === "ADMIN" || me.role === "FINANCE";
       const isAdm = me.role === "SUPER_ADMIN" || me.role === "ADMIN";
 
-      const [dash, vendos, municipalities, barangays, owners, teams, harvests, users, distributions, allocations] = await Promise.all([
+      const [dash, vendos, municipalities, barangays, owners, teams, harvests, users, distributions, allocations, version] = await Promise.all([
         api("/dashboard", token),
         api("/vendos", token),
         api("/municipalities", token),
@@ -83,9 +96,11 @@ export default function App() {
         api("/harvests", token),
         isAdm ? api("/users", token) : Promise.resolve([]),
         isFin ? api("/distributions", token).catch(() => []) : Promise.resolve([]),
-        isFin ? api("/allocations", token).catch(() => []) : Promise.resolve([])
+        isFin ? api("/allocations", token).catch(() => []) : Promise.resolve([]),
+        api("/system/version", token).catch(() => null)
       ]);
       setData({ dash, vendos, municipalities, barangays, owners, teams, harvests, users, distributions, allocations });
+      if (version) setSystemVersion(version);
     } catch (e: any) {
       if (e.status === 401 || e.message?.toLowerCase().includes("token") || e.message?.toLowerCase().includes("authentication")) {
         logout();
@@ -97,7 +112,49 @@ export default function App() {
     }
   };
 
+  const loadDetailedReport = async () => {
+    if (!token) return;
+    try {
+      const rep = await api(`/reports/detailed?from=${reportFrom}&to=${reportTo}`, token);
+      setDetailedReport(rep);
+    } catch (e: any) {
+      setError(e.message);
+    }
+  };
+
   useEffect(() => { load(); }, [token]);
+  useEffect(() => {
+    if (page === "Reports") loadDetailedReport();
+  }, [page, reportFrom, reportTo]);
+
+  async function checkUpdates() {
+    setCheckingUpdate(true);
+    setError("");
+    setNotice("");
+    try {
+      const res = await api("/system/check-updates", token);
+      setUpdateStatus(res);
+      if (res.updateAvailable) {
+        setNotice(`New update available: ${res.latestCommit} (${res.latestMessage})`);
+      } else {
+        setNotice("Your system is up to date with GitHub main branch.");
+      }
+    } catch (e: any) {
+      setError(e.message);
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
+
+  async function applyUpdate() {
+    if (!confirm("This will pull the latest code and restart services. Continue?")) return;
+    try {
+      await api("/system/apply-update", token, { method: "POST" });
+      setNotice("Update initiated in background. Refresh in ~30 seconds.");
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
 
   async function submitLogin(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -120,27 +177,50 @@ export default function App() {
     setNotice("");
     try {
       if (modal === "municipality") {
-        await api("/municipalities", token, { method: "POST", body: JSON.stringify({ name: form.name }) });
+        if (form.id) {
+          await api(`/municipalities/${form.id}`, token, { method: "PUT", body: JSON.stringify({ name: form.name }) });
+        } else {
+          await api("/municipalities", token, { method: "POST", body: JSON.stringify({ name: form.name }) });
+        }
       } else if (modal === "barangay") {
-        await api("/barangays", token, { method: "POST", body: JSON.stringify({ name: form.name, municipalityId: form.municipalityId }) });
+        if (form.id) {
+          await api(`/barangays/${form.id}`, token, { method: "PUT", body: JSON.stringify({ name: form.name, municipalityId: form.municipalityId }) });
+        } else {
+          await api("/barangays", token, { method: "POST", body: JSON.stringify({ name: form.name, municipalityId: form.municipalityId }) });
+        }
       } else if (modal === "owner") {
-        await api("/owners", token, { method: "POST", body: JSON.stringify({ name: form.name, phone: form.phone || undefined }) });
+        if (form.id) {
+          await api(`/owners/${form.id}`, token, { method: "PUT", body: JSON.stringify({ name: form.name, phone: form.phone || null, status: form.status }) });
+        } else {
+          await api("/owners", token, { method: "POST", body: JSON.stringify({ name: form.name, phone: form.phone || undefined }) });
+        }
       } else if (modal === "vendo") {
-        await api("/vendos", token, {
-          method: "POST",
-          body: JSON.stringify({
-            vlanId: Number(form.vlanId),
-            name: form.name,
-            barangayId: form.barangayId || null,
-            ownerId: form.ownerId || null,
-            ownerPercent: Number(form.ownerPercent || 25),
-            notes: form.notes || undefined
-          })
-        });
+        const payload = {
+          vlanId: Number(form.vlanId),
+          name: form.name,
+          barangayId: form.barangayId || null,
+          ownerId: form.ownerId || null,
+          ownerPercent: Number(form.ownerPercent || 25),
+          notes: form.notes || undefined,
+          status: form.status
+        };
+        if (form.id) {
+          await api(`/vendos/${form.id}`, token, { method: "PUT", body: JSON.stringify(payload) });
+        } else {
+          await api("/vendos", token, { method: "POST", body: JSON.stringify(payload) });
+        }
       } else if (modal === "team") {
-        await api("/teams", token, { method: "POST", body: JSON.stringify({ name: form.name, leader: form.leader || undefined }) });
+        if (form.id) {
+          await api(`/teams/${form.id}`, token, { method: "PUT", body: JSON.stringify({ name: form.name, leader: form.leader || null, status: form.status }) });
+        } else {
+          await api("/teams", token, { method: "POST", body: JSON.stringify({ name: form.name, leader: form.leader || undefined }) });
+        }
       } else if (modal === "user") {
-        await api("/users", token, { method: "POST", body: JSON.stringify({ ...form }) });
+        if (form.id) {
+          await api(`/users/${form.id}`, token, { method: "PUT", body: JSON.stringify({ name: form.name, role: form.role, status: form.status, password: form.password || undefined }) });
+        } else {
+          await api("/users", token, { method: "POST", body: JSON.stringify({ ...form }) });
+        }
       } else if (modal === "harvest") {
         const coins = [1, 5, 10, 20]
           .map(d => ({ denomination: d, quantity: Number(form["coin" + d] || 0) }))
@@ -175,6 +255,14 @@ export default function App() {
             note: form.note || undefined
           })
         });
+      } else if (modal === "changePassword") {
+        if (form.newPassword !== form.confirmPassword) {
+          throw new Error("New password and confirmation do not match.");
+        }
+        await api("/auth/change-password", token, {
+          method: "POST",
+          body: JSON.stringify({ currentPassword: form.currentPassword, newPassword: form.newPassword })
+        });
       }
 
       setModal("");
@@ -186,29 +274,35 @@ export default function App() {
     }
   }
 
-  async function approveHarvest(id: string) {
-    setError("");
-    setNotice("");
+  async function deleteRecord(type: string, id: string, name: string) {
+    if (!confirm(`Are you sure you want to delete or deactivate ${name}?`)) return;
+    setError(""); setNotice("");
     try {
-      await api(`/harvests/${id}/approve`, token, { method: "POST" });
-      setNotice("Harvest approved and distributions calculated.");
+      const res = await api(`/${type}/${id}`, token, { method: "DELETE" });
+      setNotice(res.message || "Record processed successfully.");
       await load();
     } catch (e: any) {
       setError(e.message);
     }
   }
 
+  async function approveHarvest(id: string) {
+    setError(""); setNotice("");
+    try {
+      await api(`/harvests/${id}/approve`, token, { method: "POST" });
+      setNotice("Harvest approved and distributions calculated.");
+      await load();
+    } catch (e: any) { setError(e.message); }
+  }
+
   async function rejectHarvest(id: string) {
     if (!confirm("Are you sure you want to reject this harvest transaction?")) return;
-    setError("");
-    setNotice("");
+    setError(""); setNotice("");
     try {
       await api(`/harvests/${id}/reject`, token, { method: "POST" });
       setNotice("Harvest transaction rejected.");
       await load();
-    } catch (e: any) {
-      setError(e.message);
-    }
+    } catch (e: any) { setError(e.message); }
   }
 
   async function approveExpense(id: string) {
@@ -227,12 +321,48 @@ export default function App() {
     } catch (e: any) { setError(e.message); }
   }
 
+  function exportCSV() {
+    const list = detailedReport?.vendosSummary || [];
+    const headers = ["VLAN ID", "Vendo Name", "Location", "Owner", "Harvest Count", "Gross", "Expenses", "Net", "Owner Share (25%)", "Employee Pool (5%)", "Company Share"];
+    const rows = list.map((v: any) => [
+      v.vlanId,
+      `"${v.name.replace(/"/g, '""')}"`,
+      `"${v.location.replace(/"/g, '""')}"`,
+      `"${v.ownerName.replace(/"/g, '""')}"`,
+      v.harvestCount,
+      v.gross,
+      v.expenses,
+      v.net,
+      v.ownerShare,
+      v.employeePool,
+      v.companyShare
+    ]);
+    const csvContent = "data:text/csv;charset=utf-8," + [headers.join(","), ...rows.map((e: any) => e.join(","))].join("\n");
+    const encodedUri = encodeURI(csvContent);
+    const link = document.createElement("a");
+    link.setAttribute("href", encodedUri);
+    link.setAttribute("download", `vendo-revenue-report-${reportFrom}-to-${reportTo}.csv`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
+  function exportJSON() {
+    const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(detailedReport || data.dash, null, 2));
+    const link = document.createElement("a");
+    link.setAttribute("href", dataStr);
+    link.setAttribute("download", `vendo-revenue-report-${reportFrom}-to-${reportTo}.json`);
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  }
+
   if (!token) {
     return (
       <div className="login">
         <form className="login-card" onSubmit={submitLogin}>
           <div className="brand-mark"><Coins size={26} /></div>
-          <h1>Vendo Revenue Manager</h1>
+          <h1>Vendo Revenue System</h1>
           <p>Sign in to your business dashboard</p>
           {error && <div className="error">{error}</div>}
           <label>Email address<input name="email" type="email" required placeholder="admin@example.com" /></label>
@@ -262,7 +392,6 @@ export default function App() {
     })
     .reverse();
 
-  // Collect all expenses from harvests
   const allExpenses = (data.harvests || []).flatMap((h: any) =>
     (h.items || []).flatMap((item: any) =>
       (item.expenses || []).map((exp: any) => ({
@@ -273,6 +402,8 @@ export default function App() {
       }))
     )
   );
+
+  const filteredExpenses = allExpenses.filter((e: any) => expenseFilter === "ALL" || e.status === expenseFilter);
 
   return (
     <div className="app-shell">
@@ -304,6 +435,7 @@ export default function App() {
           </div>
           <div className="top-actions">
             <span className="live-dot">● System online</span>
+            {systemVersion && <span style={{ fontSize: 11, color: "#78879e" }}>v{systemVersion.version} ({systemVersion.commit})</span>}
             <button className="icon-btn" onClick={load} title="Refresh data"><RefreshCw size={17} /></button>
             <div className="avatar">{user?.name?.[0] || "A"}</div>
           </div>
@@ -399,7 +531,7 @@ export default function App() {
             <div className="table-wrap">
               <table>
                 <thead>
-                  <tr><th>VLAN ID</th><th>Vendo name</th><th>Barangay</th><th>Municipality</th><th>Location owner</th><th>Owner %</th><th>Status</th></tr>
+                  <tr><th>VLAN ID</th><th>Vendo name</th><th>Barangay</th><th>Municipality</th><th>Location owner</th><th>Owner %</th><th>Status</th>{isAdmin && <th>Actions</th>}</tr>
                 </thead>
                 <tbody>
                   {filtered(data.vendos || []).map((v: any) => (
@@ -410,7 +542,15 @@ export default function App() {
                       <td>{v.barangay?.municipality?.name || "—"}</td>
                       <td>{v.owner?.name || "—"}</td>
                       <td>{v.ownerPercent}%</td>
-                      <td><span className="status">{v.status}</span></td>
+                      <td><span className={`status ${v.status.toLowerCase()}`}>{v.status}</span></td>
+                      {isAdmin && (
+                        <td>
+                          <button className="btn-action" onClick={() => { setModal("vendo"); setForm(v); }}>Edit</button>
+                          <button className="btn-action danger" onClick={() => deleteRecord("vendos", v.id, `VLAN ${v.vlanId}`)}>
+                            {v.status === "ACTIVE" ? "Deactivate" : "Delete"}
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -426,14 +566,32 @@ export default function App() {
               <section className="panel">
                 <PanelHead title="Municipalities" desc="Create and manage operating areas" action={() => setModal("municipality")} />
                 {(data.municipalities || []).map((m: any) => (
-                  <div className="list-row" key={m.id}><MapPin /><b>{m.name}</b><span>{m._count?.barangays || 0} barangays</span></div>
+                  <div className="list-row" key={m.id}>
+                    <MapPin /><b>{m.name}</b>
+                    <span>{m._count?.barangays || 0} barangays</span>
+                    {isAdmin && (
+                      <div style={{ marginLeft: 8 }}>
+                        <button className="btn-action" onClick={() => { setModal("municipality"); setForm(m); }}>Edit</button>
+                        <button className="btn-action danger" onClick={() => deleteRecord("municipalities", m.id, m.name)}>Delete</button>
+                      </div>
+                    )}
+                  </div>
                 ))}
                 {!data.municipalities?.length && <Empty text="No municipalities yet." />}
               </section>
               <section className="panel">
                 <PanelHead title="Barangays" desc="Organize vendo locations" action={() => setModal("barangay")} />
                 {(data.barangays || []).map((b: any) => (
-                  <div className="list-row" key={b.id}><MapPin /><b>{b.name}</b><span>{b.municipality?.name}</span></div>
+                  <div className="list-row" key={b.id}>
+                    <MapPin /><b>{b.name}</b>
+                    <span>{b.municipality?.name}</span>
+                    {isAdmin && (
+                      <div style={{ marginLeft: 8 }}>
+                        <button className="btn-action" onClick={() => { setModal("barangay"); setForm(b); }}>Edit</button>
+                        <button className="btn-action danger" onClick={() => deleteRecord("barangays", b.id, b.name)}>Delete</button>
+                      </div>
+                    )}
+                  </div>
                 ))}
                 {!data.barangays?.length && <Empty text="No barangays yet." />}
               </section>
@@ -441,7 +599,18 @@ export default function App() {
             <section className="panel">
               <PanelHead title="Location owners" desc="Manage vendo installation site owners" action={() => setModal("owner")} />
               {(data.owners || []).map((o: any) => (
-                <div className="list-row" key={o.id}><Users /><b>{o.name}</b><span>{o._count?.vendos || 0} vendos</span></div>
+                <div className="list-row" key={o.id}>
+                  <Users /><b>{o.name}</b>
+                  <span>{o.phone ? o.phone + " • " : ""}{o._count?.vendos || 0} vendos</span>
+                  {isAdmin && (
+                    <div style={{ marginLeft: 8 }}>
+                      <button className="btn-action" onClick={() => { setModal("owner"); setForm(o); }}>Edit</button>
+                      <button className="btn-action danger" onClick={() => deleteRecord("owners", o.id, o.name)}>
+                        {o.status === "ACTIVE" ? "Deactivate" : "Delete"}
+                      </button>
+                    </div>
+                  )}
+                </div>
               ))}
               {!data.owners?.length && <Empty text="No location owners yet." />}
             </section>
@@ -452,7 +621,18 @@ export default function App() {
           <section className="panel">
             <PanelHead title="Harvesting teams" desc="Manage teams and team leaders" action={() => setModal("team")} />
             {(data.teams || []).map((t: any) => (
-              <div className="list-row" key={t.id}><Users /><b>{t.name}</b><span>{t.leader || "No team leader assigned"}</span></div>
+              <div className="list-row" key={t.id}>
+                <Users /><b>{t.name}</b>
+                <span>{t.leader ? `Leader: ${t.leader}` : "No team leader"}</span>
+                {isAdmin && (
+                  <div style={{ marginLeft: 8 }}>
+                    <button className="btn-action" onClick={() => { setModal("team"); setForm(t); }}>Edit</button>
+                    <button className="btn-action danger" onClick={() => deleteRecord("teams", t.id, t.name)}>
+                      {t.status === "ACTIVE" ? "Deactivate" : "Delete"}
+                    </button>
+                  </div>
+                )}
+              </div>
             ))}
             {!data.teams?.length && <Empty text="No teams created yet." />}
           </section>
@@ -463,10 +643,18 @@ export default function App() {
             <PanelHead title="User management" desc="Create system accounts and assign roles" action={() => setModal("user")} />
             <div className="table-wrap">
               <table>
-                <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th></tr></thead>
+                <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
                 <tbody>
                   {(data.users || []).map((u: any) => (
-                    <tr key={u.id}><td>{u.name}</td><td>{u.email}</td><td>{u.role}</td><td>{u.status}</td></tr>
+                    <tr key={u.id}>
+                      <td><b>{u.name}</b></td>
+                      <td>{u.email}</td>
+                      <td><span className="tag">{u.role}</span></td>
+                      <td><span className={`status ${u.status.toLowerCase()}`}>{u.status}</span></td>
+                      <td>
+                        <button className="btn-action" onClick={() => { setModal("user"); setForm({ ...u, password: "" }); }}>Edit</button>
+                      </td>
+                    </tr>
                   ))}
                 </tbody>
               </table>
@@ -491,9 +679,17 @@ export default function App() {
           <section className="panel">
             <div className="panel-head">
               <div><h3>Expense overview</h3><p>Expenses are deducted from gross before revenue distribution.</p></div>
-            </div>
-            <div className="notice" style={{ marginBottom: 16 }}>
-              Expenses are submitted with harvesting sessions. Approving a harvest automatically approves its expenses, or pending expenses can be reviewed below.
+              <div className="filter-bar" style={{ margin: 0 }}>
+                <label>
+                  Filter status:
+                  <select value={expenseFilter} onChange={e => setExpenseFilter(e.target.value)}>
+                    <option value="ALL">All Statuses</option>
+                    <option value="PENDING">Pending</option>
+                    <option value="APPROVED">Approved</option>
+                    <option value="REJECTED">Rejected</option>
+                  </select>
+                </label>
+              </div>
             </div>
             <div className="table-wrap">
               <table>
@@ -510,7 +706,7 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {allExpenses.map((exp: any) => (
+                  {filteredExpenses.map((exp: any) => (
                     <tr key={exp.id}>
                       <td><b>{exp.harvestReference}</b></td>
                       <td>{new Date(exp.harvestDate).toLocaleDateString()}</td>
@@ -534,7 +730,7 @@ export default function App() {
                 </tbody>
               </table>
             </div>
-            {!allExpenses.length && <Empty text="No expenses recorded yet." />}
+            {!filteredExpenses.length && <Empty text="No expenses found matching the selected filter." />}
           </section>
         )}
 
@@ -625,8 +821,21 @@ export default function App() {
 
         {page === "Reports" && (
           <section className="panel">
-            <div className="panel-head"><div><h3>Financial summary</h3><p>Approved harvests only</p></div></div>
-            <div className="report-grid">
+            <div className="panel-head">
+              <div><h3>Financial summary & analytics</h3><p>Approved harvest revenue breakdown</p></div>
+              <div className="export-group">
+                <button className="primary small" onClick={exportCSV}><Download size={15} /> Export CSV</button>
+                <button className="secondary" style={{ padding: "6px 12px" }} onClick={exportJSON}>Export JSON</button>
+              </div>
+            </div>
+
+            <div className="filter-bar">
+              <label>From: <input type="date" value={reportFrom} onChange={e => setReportFrom(e.target.value)} /></label>
+              <label>To: <input type="date" value={reportTo} onChange={e => setReportTo(e.target.value)} /></label>
+              <button className="primary small" onClick={loadDetailedReport}>Apply Date Filter</button>
+            </div>
+
+            <div className="report-grid" style={{ marginBottom: 20 }}>
               {[
                 ["Gross collection", d.gross],
                 ["Approved expenses", d.expenses],
@@ -641,16 +850,129 @@ export default function App() {
                 </div>
               ))}
             </div>
-            <p className="muted">Summary reflects all approved transactions in the selected period.</p>
+
+            <h4>Vendo Revenue Breakdown</h4>
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>VLAN</th>
+                    <th>Vendo Name</th>
+                    <th>Location</th>
+                    <th>Owner</th>
+                    <th>Sessions</th>
+                    <th>Gross</th>
+                    <th>Expenses</th>
+                    <th>Net</th>
+                    <th>Owner (25%)</th>
+                    <th>Employee (5%)</th>
+                    <th>Company Share</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(detailedReport?.vendosSummary || []).map((v: any) => (
+                    <tr key={v.vendoId}>
+                      <td><b>{v.vlanId}</b></td>
+                      <td>{v.name}</td>
+                      <td>{v.location}</td>
+                      <td>{v.ownerName}</td>
+                      <td>{v.harvestCount}</td>
+                      <td>{money(v.gross)}</td>
+                      <td>{money(v.expenses)}</td>
+                      <td><b>{money(v.net)}</b></td>
+                      <td>{money(v.ownerShare)}</td>
+                      <td>{money(v.employeePool)}</td>
+                      <td><b style={{ color: "#198451" }}>{money(v.companyShare)}</b></td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {!detailedReport?.vendosSummary?.length && <Empty text="No vendo transaction data found for the selected period." />}
           </section>
         )}
 
         {page === "Settings" && (
-          <section className="panel">
-            <h3>System settings</h3>
-            <p className="muted">Default currency: PHP (₱). Whole-peso accounting. Expenses deducted from gross before distribution. Location owner: 25%. Employee pool: 5%. Employee allocations: manual.</p>
-            <div className="notice">Location and vendo registries are empty by default. No municipality or sample business data is preloaded.</div>
-          </section>
+          <>
+            <section className="panel">
+              <div className="panel-head">
+                <div>
+                  <h3>System & GitHub Updates</h3>
+                  <p>Check GitHub repository for application updates and patches</p>
+                </div>
+                <button className="primary small" onClick={checkUpdates} disabled={checkingUpdate}>
+                  <RefreshCw size={15} className={checkingUpdate ? "spin" : ""} />
+                  {checkingUpdate ? "Checking..." : "Check for Updates"}
+                </button>
+              </div>
+
+              <div className="update-card">
+                <div className="update-header">
+                  <div>
+                    <b style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 7 }}>
+                      <GitBranch size={16} /> Vendo Revenue System
+                    </b>
+                    <small style={{ color: "#78879e", marginTop: 4, display: "block" }}>
+                      Connected to GitHub: <a href={`https://github.com/${systemVersion?.repo || "chavxxx/Vendo-Revenue-System"}`} target="_blank" rel="noreferrer" style={{ color: "#2563d9" }}>{systemVersion?.repo || "chavxxx/Vendo-Revenue-System"}</a>
+                    </small>
+                  </div>
+                  {updateStatus ? (
+                    updateStatus.updateAvailable ? (
+                      <span className="badge-available">● Update Available</span>
+                    ) : (
+                      <span className="badge-latest">✓ Up to Date</span>
+                    )
+                  ) : (
+                    <span className="tag">Current: v{systemVersion?.version || "1.0.0"} ({systemVersion?.commit || "local"})</span>
+                  )}
+                </div>
+
+                <div style={{ fontSize: 12, color: "#54647c", lineHeight: 1.6 }}>
+                  <div>Current Version: <b>v{systemVersion?.version || "1.0.0"}</b></div>
+                  <div>Current Git Commit: <code>{systemVersion?.commit || "local"}</code></div>
+                  {updateStatus && (
+                    <div style={{ marginTop: 10, padding: "10px 12px", background: updateStatus.updateAvailable ? "#fff8f2" : "#f0fbf5", borderRadius: 8 }}>
+                      {updateStatus.updateAvailable ? (
+                        <>
+                          <div style={{ color: "#c0661a", fontWeight: 700 }}>A newer version is available on GitHub!</div>
+                          <div>Latest Commit: <code>{updateStatus.latestCommit}</code> — {updateStatus.latestMessage}</div>
+                          {updateStatus.latestDate && <div>Date: {new Date(updateStatus.latestDate).toLocaleString()}</div>}
+                          <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+                            <a href={updateStatus.commitUrl} target="_blank" rel="noreferrer" className="text-btn">View on GitHub →</a>
+                            {isAdmin && <button className="primary small" onClick={applyUpdate}><ArrowUpCircle size={15} /> Apply Update Now</button>}
+                          </div>
+                        </>
+                      ) : (
+                        <div style={{ color: "#198451" }}>
+                          ✓ You are running the latest version from the GitHub repository main branch.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              </div>
+            </section>
+
+            <section className="panel">
+              <div className="panel-head">
+                <div>
+                  <h3>Change Password</h3>
+                  <p>Update your personal account login credentials</p>
+                </div>
+              </div>
+              <form style={{ maxWidth: 400 }} onSubmit={e => { e.preventDefault(); setModal("changePassword"); save(); }}>
+                <Field label="Current Password" name="currentPassword" form={form} set={setForm} type="password" />
+                <Field label="New Password (minimum 8 characters)" name="newPassword" form={form} set={setForm} type="password" />
+                <Field label="Confirm New Password" name="confirmPassword" form={form} set={setForm} type="password" />
+                <button className="primary" style={{ marginTop: 12 }}><KeyRound size={16} /> Update Password</button>
+              </form>
+            </section>
+
+            <section className="panel">
+              <h3>System Accounting Rules</h3>
+              <p className="muted">Default currency: PHP (₱). Whole-peso accounting. Expenses deducted from gross before distribution. Location owner: 25%. Employee pool: 5% of residual. Company share: remaining net revenue. Employee share distribution: manual allocation.</p>
+            </section>
+          </>
         )}
       </main>
 
@@ -660,12 +982,12 @@ export default function App() {
             <div className="modal-head">
               <h3>
                 {({
-                  municipality: "Add municipality",
-                  barangay: "Add barangay",
-                  owner: "Add location owner",
-                  vendo: "Register vendo",
-                  team: "Create harvesting team",
-                  user: "Create user account",
+                  municipality: form.id ? "Edit municipality" : "Add municipality",
+                  barangay: form.id ? "Edit barangay" : "Add barangay",
+                  owner: form.id ? "Edit location owner" : "Add location owner",
+                  vendo: form.id ? "Edit vendo" : "Register vendo",
+                  team: form.id ? "Edit harvesting team" : "Create harvesting team",
+                  user: form.id ? "Edit user account" : "Create user account",
                   harvest: "Record coin harvest",
                   allocation: "Allocate employee share"
                 } as any)[modal]}
@@ -684,6 +1006,7 @@ export default function App() {
               <>
                 <Field label="Owner name" name="name" form={form} set={setForm} />
                 <Field label="Contact number (optional)" name="phone" form={form} set={setForm} />
+                {form.id && <SelectField label="Status" name="status" form={form} set={setForm} required options={["ACTIVE", "INACTIVE"].map(x => [x, x])} />}
               </>
             )}
             {modal === "vendo" && (
@@ -693,20 +1016,24 @@ export default function App() {
                 <SelectField label="Barangay (optional)" name="barangayId" form={form} set={setForm} options={(data.barangays || []).map((x: any) => [x.id, `${x.name} — ${x.municipality?.name || ""}`])} />
                 <SelectField label="Location owner (optional)" name="ownerId" form={form} set={setForm} options={(data.owners || []).map((x: any) => [x.id, x.name])} />
                 <Field label="Location owner percentage" name="ownerPercent" form={form} set={setForm} type="number" />
+                <Field label="Notes (optional)" name="notes" form={form} set={setForm} />
+                {form.id && <SelectField label="Status" name="status" form={form} set={setForm} required options={["ACTIVE", "INACTIVE"].map(x => [x, x])} />}
               </>
             )}
             {modal === "team" && (
               <>
                 <Field label="Team name" name="name" form={form} set={setForm} />
                 <Field label="Team leader (optional)" name="leader" form={form} set={setForm} />
+                {form.id && <SelectField label="Status" name="status" form={form} set={setForm} required options={["ACTIVE", "INACTIVE"].map(x => [x, x])} />}
               </>
             )}
             {modal === "user" && (
               <>
                 <Field label="Full name" name="name" form={form} set={setForm} />
-                <Field label="Email" name="email" form={form} set={setForm} type="email" />
-                <Field label="Initial password (minimum 12 characters)" name="password" form={form} set={setForm} type="password" />
+                {!form.id && <Field label="Email" name="email" form={form} set={setForm} type="email" />}
+                <Field label={form.id ? "Reset Password (leave empty to keep current)" : "Initial password (minimum 8 characters)"} name="password" form={form} set={setForm} type="password" />
                 <SelectField label="Role" name="role" form={form} set={setForm} required options={["ADMIN", "ENCODER", "HARVESTER", "FINANCE"].map(x => [x, x])} />
+                {form.id && <SelectField label="Status" name="status" form={form} set={setForm} required options={["ACTIVE", "INACTIVE"].map(x => [x, x])} />}
               </>
             )}
             {modal === "harvest" && (
@@ -766,7 +1093,7 @@ function Field({ label, name, form, set, type = "text", placeholder = "" }: any)
       {label}
       <input
         type={type}
-        required={["name", "vlanId", "harvestedAt", "email", "password"].includes(name)}
+        required={["name", "vlanId", "harvestedAt", "email", "currentPassword"].includes(name)}
         min={type === "number" ? 0 : undefined}
         value={form[name] ?? ""}
         placeholder={placeholder}

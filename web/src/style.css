@@ -7,3 +7,15 @@
 .btn-reject{background:#c24a4a;color:#fff;border:0;padding:5px 10px;border-radius:6px;font-size:11px;font-weight:600}
 .btn-reject:hover{background:#9d3434}
 .table-actions{display:flex;align-items:center;gap:6px}
+
+.update-card{background:#f8faff;border:1px solid #dce6f5;border-radius:10px;padding:18px;margin-top:14px}
+.update-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.badge-latest{background:#e8f7ef;color:#187a4c;padding:4px 8px;border-radius:20px;font-size:11px;font-weight:600}
+.badge-available{background:#fff1e5;color:#c0661a;padding:4px 8px;border-radius:20px;font-size:11px;font-weight:600}
+.filter-bar{display:flex;align-items:center;gap:12px;margin-bottom:16px;flex-wrap:wrap}
+.filter-bar label{font-size:11px;font-weight:600;color:#617188;display:flex;align-items:center;gap:6px}
+.filter-bar input[type="date"],.filter-bar select{border:1px solid #dfe5ee;padding:6px 10px;border-radius:6px;font-size:12px;background:#fff}
+.btn-action{background:none;border:0;color:#356ec7;font-size:11px;font-weight:600;padding:4px 6px;cursor:pointer}
+.btn-action:hover{text-decoration:underline}
+.btn-action.danger{color:#c24a4a}
+.export-group{display:flex;gap:8px;margin-left:auto}
