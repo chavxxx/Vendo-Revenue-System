@@ -3,9 +3,11 @@ node_modules/
 dist/
 coverage/
 .DS_Store
+*.tsbuildinfo
 api/node_modules/
 api/dist/
 web/node_modules/
 web/dist/
 .initial-admin-credentials
 backups/
+.vrm-npm-registry-used
