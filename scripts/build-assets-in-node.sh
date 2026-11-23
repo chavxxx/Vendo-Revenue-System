@@ -1,0 +1,130 @@
+#!/bin/sh
+set -eu
+
+ROOT="/workspace"
+API_DIR="$ROOT/api"
+WEB_DIR="$ROOT/web"
+export NODE_OPTIONS="--dns-result-order=ipv4first"
+export npm_config_fetch_retries=2
+export npm_config_fetch_retry_factor=2
+export npm_config_fetch_retry_mintimeout=2000
+export npm_config_fetch_retry_maxtimeout=15000
+export npm_config_fetch_timeout=180000
+export npm_config_maxsockets=1
+export npm_config_audit=false
+export npm_config_fund=false
+
+REGISTRIES="
+https://repo.huaweicloud.com/repository/npm/
+https://registry.npmmirror.com/
+https://registry.npmjs.org/
+"
+
+install_dependencies() {
+  label="$1"
+  dir="$2"
+  echo
+  echo "===== Installing $label dependencies ====="
+  cd "$dir"
+
+  selected=""
+  for registry in $REGISTRIES; do
+    echo
+    echo "--- Trying npm registry: $registry ---"
+    rm -rf node_modules
+
+    if npm install \
+      --registry="$registry" \
+      --legacy-peer-deps \
+      --ignore-scripts \
+      --package-lock=false \
+      --no-audit \
+      --no-fund
+    then
+      selected="$registry"
+      echo "$selected" > .vrm-npm-registry-used
+      echo "Dependency installation succeeded using $selected"
+      return 0
+    fi
+
+    echo "Registry attempt failed: $registry"
+  done
+
+  echo "ERROR: All configured npm registries failed for $label." >&2
+  return 1
+}
+
+echo "Checking OpenSSL runtime prerequisites..."
+command -v openssl >/dev/null 2>&1 || { echo "OpenSSL is missing from the Node build image." >&2; exit 1; }
+openssl version
+
+echo "Node version: $(node --version)"
+echo "npm version: $(npm --version)"
+echo "Node DNS order: IPv4 first"
+echo "Network mode is supplied by the installer (host network on Linux)."
+
+# Build frontend.
+install_dependencies "frontend" "$WEB_DIR"
+cd "$WEB_DIR"
+npm run build
+test -s dist/index.html
+rm -rf node_modules .vrm-npm-registry-used
+echo "Frontend build completed."
+
+# Build API dependencies.
+install_dependencies "API" "$API_DIR"
+cd "$API_DIR"
+
+# Prisma downloads engine archives separately from npm packages. Try the
+# maintained npmmirror binary path first, then Prisma's official CDN.
+prisma_mirror=""
+for mirror in \
+  "https://cdn.npmmirror.com/binaries/prisma" \
+  "https://binaries.prisma.sh"
+do
+  echo
+  echo "--- Downloading Prisma engines from $mirror ---"
+  if (
+    cd "$API_DIR/node_modules/@prisma/engines"
+    PRISMA_ENGINES_MIRROR="$mirror" \
+      NODE_OPTIONS="$NODE_OPTIONS" \
+      node scripts/postinstall.js
+  ); then
+    prisma_mirror="$mirror"
+    echo "Prisma engine download succeeded: $mirror"
+    break
+  fi
+  echo "Prisma engine mirror failed: $mirror"
+done
+
+if [ -z "$prisma_mirror" ]; then
+  echo "ERROR: Prisma engines could not be downloaded from either configured mirror." >&2
+  exit 1
+fi
+
+export PRISMA_ENGINES_MIRROR="$prisma_mirror"
+export DATABASE_URL="postgresql://vendo:installer-check-only@127.0.0.1:5432/vendo?schema=public"
+
+echo
+echo "===== Generating Prisma Client ====="
+./node_modules/.bin/prisma generate --schema=prisma/schema.prisma
+
+echo
+echo "===== Compiling API ====="
+npm run build
+test -s dist/server.js
+
+echo
+echo "===== Removing development-only API dependencies ====="
+npm prune --omit=dev --ignore-scripts --package-lock=false --no-audit --no-fund
+rm -f .vrm-npm-registry-used
+
+test -x node_modules/.bin/prisma
+test -d node_modules/.prisma/client
+test -s dist/server.js
+
+echo
+echo "BUILD ASSETS READY"
+echo "Frontend: $WEB_DIR/dist"
+echo "API:      $API_DIR/dist"
+echo "Runtime dependencies and generated Prisma Client: $API_DIR/node_modules"

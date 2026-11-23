@@ -1,0 +1,168 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  ENCODER
+  HARVESTER
+  FINANCE
+}
+
+enum Status {
+  ACTIVE
+  INACTIVE
+}
+
+enum HarvestStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum ExpenseStatus {
+  PENDING
+  APPROVED
+  REJECTED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(ENCODER)
+  status       Status   @default(ACTIVE)
+  createdAt    DateTime @default(now())
+  harvests     Harvest[] @relation("EncodedHarvests")
+  allocations  EmployeeAllocation[]
+}
+
+model Municipality {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  createdAt DateTime @default(now())
+  barangays Barangay[]
+}
+
+model Barangay {
+  id             String       @id @default(cuid())
+  name           String
+  municipalityId String
+  municipality   Municipality @relation(fields: [municipalityId], references: [id])
+  vendos         Vendo[]
+  @@unique([name, municipalityId])
+}
+
+model LocationOwner {
+  id        String   @id @default(cuid())
+  name      String
+  phone     String?
+  status    Status   @default(ACTIVE)
+  vendos    Vendo[]
+}
+
+model Vendo {
+  id             String        @id @default(cuid())
+  vlanId         Int           @unique
+  name           String
+  barangayId     String?
+  barangay       Barangay?     @relation(fields: [barangayId], references: [id])
+  ownerId        String?
+  owner          LocationOwner? @relation(fields: [ownerId], references: [id])
+  ownerPercent   Int           @default(25)
+  status         Status        @default(ACTIVE)
+  notes          String?
+  harvestItems   HarvestItem[]
+  createdAt      DateTime      @default(now())
+}
+
+model HarvestTeam {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  leader    String?
+  status    Status   @default(ACTIVE)
+  harvests  Harvest[]
+}
+
+model Harvest {
+  id          String        @id @default(cuid())
+  reference   String        @unique
+  harvestedAt DateTime
+  teamId      String?
+  team        HarvestTeam?  @relation(fields: [teamId], references: [id])
+  encoderId   String
+  encoder     User          @relation("EncodedHarvests", fields: [encoderId], references: [id])
+  status      HarvestStatus @default(SUBMITTED)
+  remarks     String?
+  items       HarvestItem[]
+  createdAt   DateTime      @default(now())
+  approvedAt  DateTime?
+}
+
+model HarvestItem {
+  id          String    @id @default(cuid())
+  harvestId   String
+  harvest     Harvest   @relation(fields: [harvestId], references: [id], onDelete: Cascade)
+  vendoId     String
+  vendo       Vendo     @relation(fields: [vendoId], references: [id])
+  gross       Int
+  coinCounts  CoinCount[]
+  expenses    Expense[]
+  distribution Distribution?
+  @@unique([harvestId, vendoId])
+}
+
+model CoinCount {
+  id            String      @id @default(cuid())
+  harvestItemId String
+  harvestItem   HarvestItem @relation(fields: [harvestItemId], references: [id], onDelete: Cascade)
+  denomination  Int
+  quantity      Int
+  amount        Int
+}
+
+model Expense {
+  id            String        @id @default(cuid())
+  harvestItemId String
+  harvestItem   HarvestItem   @relation(fields: [harvestItemId], references: [id], onDelete: Cascade)
+  category      String
+  description   String?
+  amount        Int
+  status        ExpenseStatus @default(PENDING)
+  createdAt     DateTime      @default(now())
+}
+
+model Distribution {
+  id                 String      @id @default(cuid())
+  harvestItemId      String      @unique
+  harvestItem        HarvestItem @relation(fields: [harvestItemId], references: [id])
+  gross              Int
+  approvedExpenses   Int
+  netAfterExpenses   Int
+  ownerPercent       Int
+  ownerShare         Int
+  employeePercent    Int
+  employeePool       Int
+  companyShare       Int
+  createdAt          DateTime    @default(now())
+  allocations        EmployeeAllocation[]
+}
+
+model EmployeeAllocation {
+  id             String       @id @default(cuid())
+  distributionId String
+  distribution   Distribution @relation(fields: [distributionId], references: [id])
+  employeeId     String
+  employee       User         @relation(fields: [employeeId], references: [id])
+  amount         Int
+  note           String?
+  createdAt      DateTime     @default(now())
+}
