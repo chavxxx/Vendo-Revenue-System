@@ -5,20 +5,29 @@ ROOT="/workspace"
 API_DIR="$ROOT/api"
 WEB_DIR="$ROOT/web"
 export NODE_OPTIONS="--dns-result-order=ipv4first"
-export npm_config_fetch_retries=2
+export npm_config_fetch_retries=1
 export npm_config_fetch_retry_factor=2
-export npm_config_fetch_retry_mintimeout=2000
-export npm_config_fetch_retry_maxtimeout=15000
-export npm_config_fetch_timeout=180000
-export npm_config_maxsockets=1
+export npm_config_fetch_retry_mintimeout=1000
+export npm_config_fetch_retry_maxtimeout=5000
+export npm_config_fetch_timeout=30000
+export npm_config_maxsockets=15
 export npm_config_audit=false
 export npm_config_fund=false
 
+# Support custom user registry, then official npm and global Cloudflare CDN, then regional mirrors
 REGISTRIES="
+${NPM_REGISTRY:-}
+https://registry.npmjs.org/
+https://registry.yarnpkg.com/
 https://repo.huaweicloud.com/repository/npm/
 https://registry.npmmirror.com/
-https://registry.npmjs.org/
 "
+
+probe_registry() {
+  url="$1"
+  code=$(curl -4 -fsS -m 4 -o /dev/null -w "%{http_code}" "${url%/}/react" 2>/dev/null || echo "000")
+  [ "$code" = "200" ]
+}
 
 install_dependencies() {
   label="$1"
@@ -29,8 +38,15 @@ install_dependencies() {
 
   selected=""
   for registry in $REGISTRIES; do
+    [ -n "$registry" ] || continue
     echo
-    echo "--- Trying npm registry: $registry ---"
+    echo "--- Testing npm registry connectivity: $registry ---"
+    if ! probe_registry "$registry"; then
+      echo "Registry unreachable or slow; skipping: $registry"
+      continue
+    fi
+
+    echo "--- Using responsive npm registry: $registry ---"
     rm -rf node_modules
 
     if npm install \
@@ -75,13 +91,14 @@ echo "Frontend build completed."
 install_dependencies "API" "$API_DIR"
 cd "$API_DIR"
 
-# Prisma downloads engine archives separately from npm packages. Try the
-# maintained npmmirror binary path first, then Prisma's official CDN.
+# Prisma engine mirrors: official CDN first, then npmmirror fallback
 prisma_mirror=""
 for mirror in \
-  "https://cdn.npmmirror.com/binaries/prisma" \
-  "https://binaries.prisma.sh"
+  "${PRISMA_ENGINES_MIRROR:-}" \
+  "https://binaries.prisma.sh" \
+  "https://cdn.npmmirror.com/binaries/prisma"
 do
+  [ -n "$mirror" ] || continue
   echo
   echo "--- Downloading Prisma engines from $mirror ---"
   if (
@@ -98,7 +115,7 @@ do
 done
 
 if [ -z "$prisma_mirror" ]; then
-  echo "ERROR: Prisma engines could not be downloaded from either configured mirror." >&2
+  echo "ERROR: Prisma engines could not be downloaded from configured mirrors." >&2
   exit 1
 fi
 

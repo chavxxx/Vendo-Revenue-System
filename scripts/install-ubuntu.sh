@@ -150,6 +150,8 @@ echo "This stage uses a regular Node container with host networking and automati
 docker run --rm \
   --network host \
   --env NODE_OPTIONS=--dns-result-order=ipv4first \
+  --env NPM_REGISTRY="${NPM_REGISTRY:-}" \
+  --env PRISMA_ENGINES_MIRROR="${PRISMA_ENGINES_MIRROR:-}" \
   --volume "$PROJECT_DIR:/workspace" \
   --workdir /workspace \
   node:22-bookworm \
