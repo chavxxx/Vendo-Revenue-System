@@ -115,35 +115,57 @@ fi
 
 cd "$API_DIR"
 
-# Prisma engine mirrors: official CDN first, then npmmirror fallback
-prisma_mirror=""
-for mirror in \
-  "${PRISMA_ENGINES_MIRROR:-}" \
-  "https://binaries.prisma.sh" \
-  "https://cdn.npmmirror.com/binaries/prisma"
-do
-  [ -n "$mirror" ] || continue
-  echo
-  echo "--- Downloading Prisma engines from $mirror ---"
-  if (
-    cd "$API_DIR/node_modules/@prisma/engines"
-    PRISMA_ENGINES_MIRROR="$mirror" \
-      NODE_OPTIONS="$NODE_OPTIONS" \
-      node scripts/postinstall.js
-  ); then
-    prisma_mirror="$mirror"
-    echo "Prisma engine download succeeded: $mirror"
-    break
-  fi
-  echo "Prisma engine mirror failed: $mirror"
-done
+ENGINES_DIR="$API_DIR/node_modules/@prisma/engines"
+mkdir -p "$ENGINES_DIR"
 
-if [ -z "$prisma_mirror" ]; then
-  echo "ERROR: Prisma engines could not be downloaded from configured mirrors." >&2
+QE_LIB="$ENGINES_DIR/libquery_engine-debian-openssl-3.0.x.so.node"
+SE_BIN="$ENGINES_DIR/schema-engine-debian-openssl-3.0.x"
+
+# 1. Unpack pre-bundled offline engines if present in the repository
+if [ -f "$ROOT/prisma-engines/debian-openssl-3.0.x/libquery_engine.so.node.gz" ] && \
+   [ -f "$ROOT/prisma-engines/debian-openssl-3.0.x/schema-engine.gz" ]; then
+  echo
+  echo "===== Unpacking bundled Prisma engines (debian-openssl-3.0.x) ====="
+  gzip -dc "$ROOT/prisma-engines/debian-openssl-3.0.x/libquery_engine.so.node.gz" > "$QE_LIB"
+  gzip -dc "$ROOT/prisma-engines/debian-openssl-3.0.x/schema-engine.gz" > "$SE_BIN"
+  chmod +x "$QE_LIB" "$SE_BIN"
+  echo "Prisma engines unpacked successfully from repository bundle."
+fi
+
+# 2. Fallback: if engines are missing, download directly with curl (with retries and resume)
+if [ ! -s "$QE_LIB" ] || [ ! -s "$SE_BIN" ]; then
+  echo
+  echo "===== Downloading Prisma engines via curl ====="
+  PRISMA_HASH="c2990dca591cba766e3b7ef5d9e8a84796e47ab7"
+  for mirror in \
+    "${PRISMA_ENGINES_MIRROR:-}" \
+    "https://binaries.prisma.sh" \
+    "https://cdn.npmmirror.com/binaries/prisma"
+  do
+    [ -n "$mirror" ] || continue
+    echo "--- Trying Prisma engine mirror: $mirror ---"
+    if curl -fL -s -S --retry 3 --retry-connrefused -m 60 \
+      "$mirror/all_commits/$PRISMA_HASH/debian-openssl-3.0.x/libquery_engine.so.node.gz" | gzip -d > "$QE_LIB" && \
+       curl -fL -s -S --retry 3 --retry-connrefused -m 60 \
+      "$mirror/all_commits/$PRISMA_HASH/debian-openssl-3.0.x/schema-engine.gz" | gzip -d > "$SE_BIN"; then
+      chmod +x "$QE_LIB" "$SE_BIN"
+      echo "Prisma engines download succeeded via curl from $mirror"
+      break
+    else
+      echo "Prisma engines download failed from $mirror"
+      rm -f "$QE_LIB" "$SE_BIN"
+    fi
+  done
+fi
+
+if [ ! -s "$QE_LIB" ] || [ ! -s "$SE_BIN" ]; then
+  echo "ERROR: Failed to obtain Prisma engines for debian-openssl-3.0.x." >&2
   exit 1
 fi
 
-export PRISMA_ENGINES_MIRROR="$prisma_mirror"
+export PRISMA_QUERY_ENGINE_LIBRARY="$QE_LIB"
+export PRISMA_SCHEMA_ENGINE_BINARY="$SE_BIN"
+export PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING=1
 export DATABASE_URL="postgresql://vendo:installer-check-only@127.0.0.1:5432/vendo?schema=public"
 
 echo

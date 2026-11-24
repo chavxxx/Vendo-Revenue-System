@@ -29,6 +29,9 @@ services:
       ADMIN_EMAIL: ${ADMIN_EMAIL:-admin@localhost}
       ADMIN_PASSWORD: ${ADMIN_PASSWORD:?Set ADMIN_PASSWORD in .env}
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      PRISMA_QUERY_ENGINE_LIBRARY: /app/node_modules/@prisma/engines/libquery_engine-debian-openssl-3.0.x.so.node
+      PRISMA_SCHEMA_ENGINE_BINARY: /app/node_modules/@prisma/engines/schema-engine-debian-openssl-3.0.x
+      PRISMA_ENGINES_CHECKSUM_IGNORE_MISSING: "1"
     depends_on:
       db:
         condition: service_healthy
