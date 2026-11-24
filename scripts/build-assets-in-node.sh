@@ -5,12 +5,12 @@ ROOT="/workspace"
 API_DIR="$ROOT/api"
 WEB_DIR="$ROOT/web"
 export NODE_OPTIONS="--dns-result-order=ipv4first"
-export npm_config_fetch_retries=1
+export npm_config_fetch_retries=2
 export npm_config_fetch_retry_factor=2
-export npm_config_fetch_retry_mintimeout=1000
-export npm_config_fetch_retry_maxtimeout=5000
-export npm_config_fetch_timeout=30000
-export npm_config_maxsockets=15
+export npm_config_fetch_retry_mintimeout=2000
+export npm_config_fetch_retry_maxtimeout=10000
+export npm_config_fetch_timeout=60000
+export npm_config_maxsockets=10
 export npm_config_audit=false
 export npm_config_fund=false
 
@@ -19,19 +19,21 @@ REGISTRIES="
 ${NPM_REGISTRY:-}
 https://registry.npmjs.org/
 https://registry.yarnpkg.com/
-https://repo.huaweicloud.com/repository/npm/
 https://registry.npmmirror.com/
+https://repo.huaweicloud.com/repository/npm/
 "
 
 probe_registry() {
   url="$1"
-  code=$(curl -4 -fsS -m 4 -o /dev/null -w "%{http_code}" "${url%/}/react" 2>/dev/null || echo "000")
+  code=$(curl -4 -fsS -m 4 -o /dev/null -w "%{http_code}" "${url%/}/react" 2>/dev/null || curl -fsS -m 4 -o /dev/null -w "%{http_code}" "${url%/}/react" 2>/dev/null || echo "000")
   [ "$code" = "200" ]
 }
 
 install_dependencies() {
   label="$1"
   dir="$2"
+  shift 2 || true
+  extra_flags="$*"
   echo
   echo "===== Installing $label dependencies ====="
   cd "$dir"
@@ -53,9 +55,9 @@ install_dependencies() {
       --registry="$registry" \
       --legacy-peer-deps \
       --ignore-scripts \
-      --package-lock=false \
       --no-audit \
-      --no-fund
+      --no-fund \
+      $extra_flags
     then
       selected="$registry"
       echo "$selected" > .vrm-npm-registry-used
@@ -79,16 +81,38 @@ echo "npm version: $(npm --version)"
 echo "Node DNS order: IPv4 first"
 echo "Network mode is supplied by the installer (host network on Linux)."
 
-# Build frontend.
-install_dependencies "frontend" "$WEB_DIR"
-cd "$WEB_DIR"
-npm run build
-test -s dist/index.html
-rm -rf node_modules .vrm-npm-registry-used
-echo "Frontend build completed."
+# Build frontend if not pre-built
+if [ -s "$WEB_DIR/dist/index.html" ] && [ "${FORCE_REBUILD:-false}" != "true" ]; then
+  echo
+  echo "===== Frontend pre-built assets detected ====="
+  echo "Using verified distribution in $WEB_DIR/dist (skipping npm install & build)."
+else
+  install_dependencies "frontend" "$WEB_DIR"
+  cd "$WEB_DIR"
+  npm run build
+  test -s dist/index.html
+  rm -rf node_modules .vrm-npm-registry-used
+  echo "Frontend build completed."
+fi
 
-# Build API dependencies.
-install_dependencies "API" "$API_DIR"
+# Build API dependencies
+if [ -s "$API_DIR/dist/server.js" ] && [ "${FORCE_REBUILD:-false}" != "true" ]; then
+  echo
+  echo "===== API pre-compiled assets detected ====="
+  echo "Installing runtime production dependencies only (skipping TypeScript/dev build)..."
+  install_dependencies "API (production runtime)" "$API_DIR" "--omit=dev"
+else
+  install_dependencies "API (full build)" "$API_DIR"
+  cd "$API_DIR"
+  echo
+  echo "===== Compiling API ====="
+  npm run build
+  test -s dist/server.js
+  echo
+  echo "===== Removing development-only API dependencies ====="
+  npm prune --omit=dev --ignore-scripts --no-audit --no-fund
+fi
+
 cd "$API_DIR"
 
 # Prisma engine mirrors: official CDN first, then npmmirror fallback
@@ -126,14 +150,6 @@ echo
 echo "===== Generating Prisma Client ====="
 ./node_modules/.bin/prisma generate --schema=prisma/schema.prisma
 
-echo
-echo "===== Compiling API ====="
-npm run build
-test -s dist/server.js
-
-echo
-echo "===== Removing development-only API dependencies ====="
-npm prune --omit=dev --ignore-scripts --package-lock=false --no-audit --no-fund
 rm -f .vrm-npm-registry-used
 
 test -x node_modules/.bin/prisma
@@ -145,3 +161,4 @@ echo "BUILD ASSETS READY"
 echo "Frontend: $WEB_DIR/dist"
 echo "API:      $API_DIR/dist"
 echo "Runtime dependencies and generated Prisma Client: $API_DIR/node_modules"
+

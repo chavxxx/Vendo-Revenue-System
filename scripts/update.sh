@@ -47,8 +47,8 @@ fi
 
 # Restart services if docker is active
 if command -v docker >/dev/null 2>&1 && docker compose ps --services 2>/dev/null | grep -q 'api'; then
-  echo "Restarting application containers..."
-  docker compose restart api web 2>/dev/null || true
+  echo "Restarting application containers with latest build..."
+  docker compose up -d --build api web 2>/dev/null || docker compose restart api web 2>/dev/null || true
 fi
 
 echo "Update process finished!"
