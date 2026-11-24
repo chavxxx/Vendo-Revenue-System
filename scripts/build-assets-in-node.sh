@@ -5,12 +5,12 @@ ROOT="/workspace"
 API_DIR="$ROOT/api"
 WEB_DIR="$ROOT/web"
 export NODE_OPTIONS="--dns-result-order=ipv4first"
-export npm_config_fetch_retries=2
+export npm_config_fetch_retries=3
 export npm_config_fetch_retry_factor=2
 export npm_config_fetch_retry_mintimeout=2000
 export npm_config_fetch_retry_maxtimeout=10000
-export npm_config_fetch_timeout=60000
-export npm_config_maxsockets=10
+export npm_config_fetch_timeout=120000
+export npm_config_maxsockets=15
 export npm_config_audit=false
 export npm_config_fund=false
 
@@ -22,12 +22,6 @@ https://registry.yarnpkg.com/
 https://registry.npmmirror.com/
 https://repo.huaweicloud.com/repository/npm/
 "
-
-probe_registry() {
-  url="$1"
-  code=$(curl -4 -fsS -m 4 -o /dev/null -w "%{http_code}" "${url%/}/react" 2>/dev/null || curl -fsS -m 4 -o /dev/null -w "%{http_code}" "${url%/}/react" 2>/dev/null || echo "000")
-  [ "$code" = "200" ]
-}
 
 install_dependencies() {
   label="$1"
@@ -42,13 +36,7 @@ install_dependencies() {
   for registry in $REGISTRIES; do
     [ -n "$registry" ] || continue
     echo
-    echo "--- Testing npm registry connectivity: $registry ---"
-    if ! probe_registry "$registry"; then
-      echo "Registry unreachable or slow; skipping: $registry"
-      continue
-    fi
-
-    echo "--- Using responsive npm registry: $registry ---"
+    echo "--- Trying npm registry: $registry ---"
     rm -rf node_modules
 
     if npm install \
