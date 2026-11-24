@@ -14,6 +14,32 @@ if [[ "${EUID}" -ne 0 ]]; then
   exec sudo -E bash "$SCRIPT_PATH" "$@"
 fi
 
+NPM_REGISTRY="${NPM_REGISTRY:-}"
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --registry|-r)
+      NPM_REGISTRY="$2"
+      shift 2
+      ;;
+    --registry=*)
+      NPM_REGISTRY="${1#*=}"
+      shift
+      ;;
+    http://*|https://*)
+      NPM_REGISTRY="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+if [[ -z "$NPM_REGISTRY" && -f "$PROJECT_DIR/.env" ]]; then
+  NPM_REGISTRY="$(grep '^NPM_REGISTRY=' "$PROJECT_DIR/.env" | cut -d= -f2- | tr -d '"' | tr -d "'" || true)"
+fi
+export NPM_REGISTRY
+
 [[ -f "$PROJECT_DIR/docker-compose.yml" ]] || die "Run this installer from the extracted Vendo Revenue Manager project."
 [[ -f "$PROJECT_DIR/api/package.json" ]] || die "API source files are missing."
 [[ -f "$PROJECT_DIR/web/package.json" ]] || die "Frontend source files are missing."

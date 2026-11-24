@@ -14,13 +14,16 @@ export npm_config_maxsockets=15
 export npm_config_audit=false
 export npm_config_fund=false
 
-# Support custom user registry, then official npm and global Cloudflare CDN, then regional mirrors
+# Support custom user registry, then global CDNs and regional mirrors
 REGISTRIES="
 ${NPM_REGISTRY:-}
 https://registry.npmjs.org/
 https://registry.yarnpkg.com/
 https://registry.npmmirror.com/
+https://mirrors.tencent.com/npm/
+https://r.cnpmjs.org/
 https://repo.huaweicloud.com/repository/npm/
+https://mirrors.huaweicloud.com/repository/npm/
 "
 
 install_dependencies() {
@@ -84,7 +87,11 @@ else
 fi
 
 # Build API dependencies
-if [ -s "$API_DIR/dist/server.js" ] && [ "${FORCE_REBUILD:-false}" != "true" ]; then
+if [ -d "$API_DIR/node_modules" ] && [ -x "$API_DIR/node_modules/.bin/prisma" ] && [ "${FORCE_REBUILD:-false}" != "true" ]; then
+  echo
+  echo "===== Existing API dependencies detected in $API_DIR/node_modules ====="
+  echo "Using existing installed dependencies."
+elif [ -s "$API_DIR/dist/server.js" ] && [ "${FORCE_REBUILD:-false}" != "true" ]; then
   echo
   echo "===== API pre-compiled assets detected ====="
   echo "Installing runtime production dependencies only (skipping TypeScript/dev build)..."
