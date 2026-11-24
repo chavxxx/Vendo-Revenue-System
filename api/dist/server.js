@@ -13,6 +13,8 @@ const client_1 = require("@prisma/client");
 const zod_1 = require("zod");
 const child_process_1 = require("child_process");
 const path_1 = __importDefault(require("path"));
+const fs_1 = __importDefault(require("fs"));
+const http_1 = __importDefault(require("http"));
 const prisma = new client_1.PrismaClient();
 const app = (0, express_1.default)();
 app.use((0, helmet_1.default)());
@@ -49,12 +51,52 @@ function pesos(n) {
 }
 function roundPeso(n) { return Math.floor(n + 0.5); }
 function getLocalCommit() {
+    if (process.env.GIT_COMMIT && process.env.GIT_COMMIT !== "local") {
+        return process.env.GIT_COMMIT.trim();
+    }
     try {
-        return (0, child_process_1.execSync)("git rev-parse HEAD", { timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+        const gitSha = (0, child_process_1.execSync)("git rev-parse HEAD", { timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+        if (gitSha && gitSha.length >= 7)
+            return gitSha;
     }
-    catch {
-        return process.env.GIT_COMMIT || "local";
+    catch { }
+    try {
+        if (fs_1.default.existsSync("/workspace/.git")) {
+            const gitSha = (0, child_process_1.execSync)("git -C /workspace rev-parse HEAD", { timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+            if (gitSha && gitSha.length >= 7)
+                return gitSha;
+        }
     }
+    catch { }
+    const searchPaths = [
+        path_1.default.resolve(__dirname, "version.json"),
+        path_1.default.resolve(__dirname, "../version.json"),
+        path_1.default.resolve(__dirname, "../../version.json"),
+        "/workspace/version.json",
+        "/app/dist/version.json",
+        "/app/version.json",
+        path_1.default.resolve(__dirname, "../.git-commit"),
+        path_1.default.resolve(__dirname, "../../.git-commit"),
+        "/workspace/.git-commit"
+    ];
+    for (const p of searchPaths) {
+        try {
+            if (fs_1.default.existsSync(p)) {
+                if (p.endsWith(".json")) {
+                    const data = JSON.parse(fs_1.default.readFileSync(p, "utf-8"));
+                    if (data.commit)
+                        return data.commit.trim();
+                }
+                else {
+                    const content = fs_1.default.readFileSync(p, "utf-8").trim();
+                    if (content)
+                        return content;
+                }
+            }
+        }
+        catch { }
+    }
+    return "dev";
 }
 async function bootstrap() {
     const email = process.env.ADMIN_EMAIL || "admin@example.com";
@@ -712,6 +754,26 @@ app.post("/api/system/settings", auth, allow(...adminRoles), async (req, res) =>
         res.status(500).json({ error: e.message });
     }
 });
+function restartDockerContainer(containerName) {
+    return new Promise((resolve) => {
+        if (!fs_1.default.existsSync("/var/run/docker.sock"))
+            return resolve(false);
+        const req = http_1.default.request({
+            socketPath: "/var/run/docker.sock",
+            path: `/v1.43/containers/${containerName}/restart`,
+            method: "POST"
+        }, (res) => resolve(res.statusCode === 204 || res.statusCode === 200));
+        req.on("error", (e) => {
+            console.warn(`[Updater] Docker socket restart for ${containerName} failed:`, e.message);
+            resolve(false);
+        });
+        req.setTimeout(8000, () => {
+            req.destroy();
+            resolve(false);
+        });
+        req.end();
+    });
+}
 // System Version & GitHub Update Checker
 app.get("/api/system/version", auth, async (_req, res) => {
     const commit = getLocalCommit();
@@ -745,16 +807,20 @@ app.get("/api/system/check-updates", auth, async (_req, res) => {
         }
         const latest = await resp.json();
         const remoteSha = latest.sha || "";
-        const updateAvailable = Boolean(localCommit &&
+        const isSame = Boolean(localCommit &&
             remoteSha &&
-            localCommit !== "local" &&
-            !localCommit.startsWith(remoteSha) &&
-            !remoteSha.startsWith(localCommit));
+            localCommit !== "dev" &&
+            (localCommit.toLowerCase().startsWith(remoteSha.toLowerCase()) ||
+                remoteSha.toLowerCase().startsWith(localCommit.toLowerCase())));
+        const updateAvailable = Boolean(remoteSha && !isSame);
         res.json({
             currentVersion: APP_VERSION,
             currentCommit: localCommit ? localCommit.slice(0, 7) : "dev",
+            fullCurrentCommit: localCommit,
             latestCommit: remoteSha.slice(0, 7),
+            fullLatestCommit: remoteSha,
             latestMessage: latest.commit?.message?.split("\n")[0] || "",
+            latestAuthor: latest.commit?.author?.name || latest.author?.login || "Maintainer",
             latestDate: latest.commit?.committer?.date || latest.commit?.author?.date,
             updateAvailable,
             repoUrl: `https://github.com/${GITHUB_REPO}`,
@@ -766,16 +832,82 @@ app.get("/api/system/check-updates", auth, async (_req, res) => {
     }
 });
 app.post("/api/system/apply-update", auth, allow(client_1.Role.SUPER_ADMIN), async (_req, res) => {
-    const updateScript = path_1.default.resolve(__dirname, "../../scripts/update.sh");
-    (0, child_process_1.exec)(`bash "${updateScript}"`, (error, stdout, stderr) => {
-        if (error) {
-            console.error("Update script failed:", error, stderr);
-        }
-        else {
-            console.log("Update script finished:", stdout);
-        }
+    let projectRoot = "";
+    if (fs_1.default.existsSync("/workspace/scripts/update.sh") || fs_1.default.existsSync("/workspace/.git")) {
+        projectRoot = "/workspace";
+    }
+    else if (fs_1.default.existsSync(path_1.default.resolve(__dirname, "../../scripts/update.sh"))) {
+        projectRoot = path_1.default.resolve(__dirname, "../..");
+    }
+    else if (fs_1.default.existsSync(path_1.default.resolve(__dirname, "../scripts/update.sh"))) {
+        projectRoot = path_1.default.resolve(__dirname, "..");
+    }
+    else {
+        projectRoot = process.cwd();
+    }
+    console.log(`[Updater] Starting update process in root: ${projectRoot}`);
+    // Send early HTTP response so UI can show progress immediately
+    res.json({
+        status: "started",
+        message: "Update initiated. Pulling code from GitHub, syncing database, and reloading services."
     });
-    res.json({ status: "started", message: "Update initiated in background. The system will refresh when complete." });
+    // Execute update sequence asynchronously
+    setTimeout(async () => {
+        try {
+            try {
+                (0, child_process_1.execSync)("git config --global --add safe.directory '*'", { timeout: 5000, stdio: "ignore" });
+            }
+            catch { }
+            let gitSuccess = false;
+            try {
+                console.log(`[Updater] Running git fetch and reset to origin/main in ${projectRoot}...`);
+                (0, child_process_1.execSync)(`git -C "${projectRoot}" fetch origin main`, { timeout: 60000, stdio: "inherit" });
+                (0, child_process_1.execSync)(`git -C "${projectRoot}" reset --hard origin/main`, { timeout: 30000, stdio: "inherit" });
+                gitSuccess = true;
+                console.log(`[Updater] Git update succeeded.`);
+            }
+            catch (e) {
+                console.warn(`[Updater] Direct git reset failed (${e.message}), trying update.sh script...`);
+                const updateScript = path_1.default.join(projectRoot, "scripts/update.sh");
+                if (fs_1.default.existsSync(updateScript)) {
+                    try {
+                        (0, child_process_1.execSync)(`bash "${updateScript}"`, { timeout: 90000, stdio: "inherit" });
+                        gitSuccess = true;
+                    }
+                    catch (shErr) {
+                        console.error(`[Updater] bash update.sh failed:`, shErr.message);
+                    }
+                }
+            }
+            // Sync Prisma schema
+            try {
+                console.log(`[Updater] Syncing Prisma database schema...`);
+                const prismaCmd = fs_1.default.existsSync("./node_modules/.bin/prisma")
+                    ? "./node_modules/.bin/prisma"
+                    : fs_1.default.existsSync(`${projectRoot}/api/node_modules/.bin/prisma`)
+                        ? `${projectRoot}/api/node_modules/.bin/prisma`
+                        : "npx prisma";
+                (0, child_process_1.execSync)(`${prismaCmd} db push --skip-generate`, { timeout: 45000, stdio: "inherit" });
+                console.log(`[Updater] Database schema sync completed.`);
+            }
+            catch (pErr) {
+                console.warn(`[Updater] Prisma db push warning:`, pErr.message);
+            }
+            // If Docker socket is mounted, restart Nginx and API containers
+            if (fs_1.default.existsSync("/var/run/docker.sock")) {
+                console.log(`[Updater] Restarting vrm-web container...`);
+                await restartDockerContainer("vrm-web");
+                console.log(`[Updater] Restarting vrm-api container...`);
+                await restartDockerContainer("vrm-api");
+            }
+            // Also exit current process cleanly so container restart policy or host supervisor refreshes
+            console.log(`[Updater] Process reload scheduled in 1.2s.`);
+            setTimeout(() => process.exit(0), 1200);
+        }
+        catch (err) {
+            console.error(`[Updater] Update execution encountered error:`, err);
+        }
+    }, 100);
 });
 app.use((err, _req, res, _next) => {
     console.error(err);

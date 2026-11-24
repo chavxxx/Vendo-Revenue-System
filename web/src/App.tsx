@@ -51,6 +51,10 @@ export default function App() {
   const [systemVersion, setSystemVersion] = useState<any>(null);
   const [updateStatus, setUpdateStatus] = useState<any>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [dismissUpdateBanner, setDismissUpdateBanner] = useState(false);
+  const [updatingSystem, setUpdatingSystem] = useState(false);
+  const [updateProgressText, setUpdateProgressText] = useState("");
+  const [updateError, setUpdateError] = useState("");
 
   // Expense filter
   const [expenseFilter, setExpenseFilter] = useState("ALL");
@@ -162,32 +166,84 @@ export default function App() {
     if (page === "Reports") loadDetailedReport();
   }, [page, reportFrom, reportTo]);
 
-  async function checkUpdates() {
-    setCheckingUpdate(true);
-    setError("");
-    setNotice("");
+  async function checkUpdates(silent = false) {
+    if (!silent) {
+      setCheckingUpdate(true);
+      setError("");
+      setNotice("");
+    }
     try {
       const res = await api("/system/check-updates", token);
       setUpdateStatus(res);
-      if (res.updateAvailable) {
-        setNotice(`New update available: ${res.latestCommit} (${res.latestMessage})`);
-      } else {
-        setNotice("Your system is up to date with GitHub main branch.");
+      if (!silent) {
+        if (res.updateAvailable) {
+          setNotice(`New update available on GitHub: ${res.latestCommit} (${res.latestMessage})`);
+        } else {
+          setNotice("Your system is up to date with GitHub main branch.");
+        }
       }
     } catch (e: any) {
-      setError(e.message);
+      if (!silent) setError(e.message);
     } finally {
-      setCheckingUpdate(false);
+      if (!silent) setCheckingUpdate(false);
     }
   }
 
+  // Automatic background update check on app load & every 15 minutes
+  useEffect(() => {
+    if (!token) return;
+    checkUpdates(true);
+
+    const timer = setInterval(() => {
+      checkUpdates(true);
+    }, 15 * 60 * 1000);
+
+    return () => clearInterval(timer);
+  }, [token]);
+
   async function applyUpdate() {
-    if (!confirm("This will pull the latest code and restart services. Continue?")) return;
+    if (!confirm("This will pull the latest code from GitHub, apply database schema changes, and reload the application. Continue?")) return;
+    setUpdatingSystem(true);
+    setUpdateProgressText("Contacting server to initiate GitHub update...");
+    setUpdateError("");
+
     try {
       await api("/system/apply-update", token, { method: "POST" });
-      setNotice("Update initiated in background. Refresh in ~30 seconds.");
+      setUpdateProgressText("Pulling latest code from GitHub and syncing database schema... (this usually takes ~15-30s)");
+
+      // Poll until server reloads with the updated commit
+      let attempts = 0;
+      const maxAttempts = 35;
+      const pollInterval = setInterval(async () => {
+        attempts++;
+        if (attempts > 5) {
+          setUpdateProgressText(`Reloading application services... (attempt ${attempts}/${maxAttempts})`);
+        }
+        try {
+          const v = await fetch("/api/system/version", {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          if (v.ok) {
+            const data = await v.json();
+            clearInterval(pollInterval);
+            setUpdateProgressText(`Update successfully applied! System is now on commit ${data.commit}. Reloading...`);
+            setTimeout(() => {
+              window.location.reload();
+            }, 1200);
+          }
+        } catch {
+          // Server temporarily restarting
+        }
+
+        if (attempts >= maxAttempts) {
+          clearInterval(pollInterval);
+          setUpdateProgressText("");
+          setUpdateError("The update was initiated, but the server took longer than expected to reload. Please refresh the page manually.");
+        }
+      }, 2500);
     } catch (e: any) {
-      setError(e.message);
+      setUpdateProgressText("");
+      setUpdateError("Failed to initiate update: " + e.message);
     }
   }
 
@@ -493,6 +549,55 @@ export default function App() {
           </div>
         </header>
 
+        {/* Global Update Notification Banner */}
+        {updateStatus?.updateAvailable && !dismissUpdateBanner && (
+          <div className="update-banner">
+            <div className="update-banner-info">
+              <span className="update-badge">
+                <ArrowUpCircle size={14} /> Update Available
+              </span>
+              <span className="update-banner-text">
+                New version available on GitHub (<code>{updateStatus.latestCommit}</code>: <b>{updateStatus.latestMessage}</b>)
+              </span>
+            </div>
+            <div className="update-banner-actions">
+              {isAdmin && (
+                <button className="update-btn-action" onClick={applyUpdate} disabled={updatingSystem}>
+                  <ArrowUpCircle size={15} /> Update from GitHub
+                </button>
+              )}
+              <a href={updateStatus.commitUrl || `https://github.com/${systemVersion?.repo || "chavxxx/Vendo-Revenue-System"}`} target="_blank" rel="noreferrer" className="update-banner-link">
+                View Changes
+              </a>
+              <button className="update-banner-dismiss" onClick={() => setDismissUpdateBanner(true)} title="Dismiss notice">
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* Updating Modal Overlay */}
+        {updatingSystem && (
+          <div className="modal-backdrop">
+            <div className="modal" style={{ maxWidth: 440, textAlign: "center", padding: "30px 22px" }}>
+              <div style={{ width: 56, height: 56, borderRadius: "50%", background: "#eff6ff", color: "#2563eb", display: "grid", placeItems: "center", margin: "0 auto 16px" }}>
+                <RefreshCw size={26} className={updateError ? "" : "spin"} />
+              </div>
+              <h3 style={{ margin: "0 0 8px", font: "800 18px Manrope" }}>
+                {updateError ? "Update Alert" : "Updating System from GitHub"}
+              </h3>
+              <p style={{ fontSize: 13, color: "#64748b", margin: "0 0 20px", lineHeight: 1.6 }}>
+                {updateError ? updateError : updateProgressText}
+              </p>
+              {updateError && (
+                <button className="primary" onClick={() => setUpdatingSystem(false)} style={{ margin: "0 auto" }}>
+                  Close
+                </button>
+              )}
+            </div>
+          </div>
+        )}
+
         {error && <div className="error banner">{error}<button onClick={() => setError("")}>×</button></div>}
         {notice && <div className="success banner">{notice}<button onClick={() => setNotice("")}>×</button></div>}
 
@@ -580,6 +685,7 @@ export default function App() {
           <section className="panel">
             <PanelHead title="Vendo registry" desc="Manage coin-operated machines using unique VLAN IDs" action={() => { setModal("vendo"); setForm({ ownerPercent: 25 }); }} />
             <input className="search" placeholder="Search VLAN or vendo name..." value={search} onChange={e => setSearch(e.target.value)} />
+            <div className="mobile-scroll-hint">← Swipe horizontally to view full table →</div>
             <div className="table-wrap">
               <table>
                 <thead>
@@ -693,6 +799,7 @@ export default function App() {
         {page === "Users" && (
           <section className="panel">
             <PanelHead title="User management" desc="Create system accounts and assign roles" action={() => setModal("user")} />
+            <div className="mobile-scroll-hint">← Swipe horizontally to view full table →</div>
             <div className="table-wrap">
               <table>
                 <thead><tr><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Actions</th></tr></thead>
@@ -743,6 +850,7 @@ export default function App() {
                 </label>
               </div>
             </div>
+            <div className="mobile-scroll-hint">← Swipe horizontally to view full table →</div>
             <div className="table-wrap">
               <table>
                 <thead>
@@ -794,6 +902,7 @@ export default function App() {
             <div className="notice" style={{ marginBottom: 16 }}>
               Financial rule: 5% of the remaining 75% after location owner distribution is reserved as an employee pool. Allocations are manually managed below.
             </div>
+            <div className="mobile-scroll-hint">← Swipe horizontally to view full table →</div>
             <div className="table-wrap">
               <table>
                 <thead>
@@ -867,6 +976,7 @@ export default function App() {
             {data.allocations?.length > 0 && (
               <div style={{ marginTop: 24 }}>
                 <h4>Recorded Employee Allocations</h4>
+                <div className="mobile-scroll-hint">← Swipe horizontally to view full table →</div>
                 <div className="table-wrap">
                   <table>
                     <thead>
@@ -922,6 +1032,7 @@ export default function App() {
             </div>
 
             <h4>Vendo Revenue Breakdown</h4>
+            <div className="mobile-scroll-hint">← Swipe horizontally to view full table →</div>
             <div className="table-wrap">
               <table>
                 <thead>
@@ -970,7 +1081,7 @@ export default function App() {
                   <h3>System & GitHub Updates</h3>
                   <p>Check GitHub repository for application updates and patches</p>
                 </div>
-                <button className="primary small" onClick={checkUpdates} disabled={checkingUpdate}>
+                <button className="primary small" onClick={() => checkUpdates(false)} disabled={checkingUpdate}>
                   <RefreshCw size={15} className={checkingUpdate ? "spin" : ""} />
                   {checkingUpdate ? "Checking..." : "Check for Updates"}
                 </button>
@@ -1001,20 +1112,27 @@ export default function App() {
                   <div>Current Version: <b>v{systemVersion?.version || "1.0.0"}</b></div>
                   <div>Current Git Commit: <code>{systemVersion?.commit || "local"}</code></div>
                   {updateStatus && (
-                    <div style={{ marginTop: 10, padding: "10px 12px", background: updateStatus.updateAvailable ? "#fff8f2" : "#f0fbf5", borderRadius: 8 }}>
+                    <div style={{ marginTop: 10, padding: "12px 14px", background: updateStatus.updateAvailable ? "#fff8f2" : "#f0fbf5", borderRadius: 8, border: updateStatus.updateAvailable ? "1px solid #fed7aa" : "1px solid #bbf7d0" }}>
                       {updateStatus.updateAvailable ? (
                         <>
-                          <div style={{ color: "#c0661a", fontWeight: 700 }}>A newer version is available on GitHub!</div>
+                          <div style={{ color: "#c0661a", fontWeight: 700, fontSize: 13, marginBottom: 4 }}>
+                            🚀 A newer version is available on GitHub!
+                          </div>
                           <div>Latest Commit: <code>{updateStatus.latestCommit}</code> — {updateStatus.latestMessage}</div>
+                          {updateStatus.latestAuthor && <div>Author: {updateStatus.latestAuthor}</div>}
                           {updateStatus.latestDate && <div>Date: {new Date(updateStatus.latestDate).toLocaleString()}</div>}
-                          <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
-                            <a href={updateStatus.commitUrl} target="_blank" rel="noreferrer" className="text-btn">View on GitHub →</a>
-                            {isAdmin && <button className="primary small" onClick={applyUpdate}><ArrowUpCircle size={15} /> Apply Update Now</button>}
+                          <div style={{ marginTop: 12, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                            <a href={updateStatus.commitUrl} target="_blank" rel="noreferrer" className="text-btn">View Changes on GitHub →</a>
+                            {isAdmin && (
+                              <button className="primary small" onClick={applyUpdate} disabled={updatingSystem}>
+                                <ArrowUpCircle size={15} /> {updatingSystem ? "Updating..." : "Update Now from GitHub"}
+                              </button>
+                            )}
                           </div>
                         </>
                       ) : (
-                        <div style={{ color: "#198451" }}>
-                          ✓ You are running the latest version from the GitHub repository main branch.
+                        <div style={{ color: "#198451", fontWeight: 600 }}>
+                          ✓ Your system is fully up to date with the GitHub repository main branch.
                         </div>
                       )}
                     </div>
@@ -1290,7 +1408,9 @@ function PanelHead({ title, desc, action }: any) {
   return (
     <div className="panel-head">
       <div><h3>{title}</h3><p>{desc}</p></div>
-      <button className="primary small" onClick={action}><Plus size={16} /> Add new</button>
+      {action && (
+        <button className="primary small" onClick={action}><Plus size={16} /> Add new</button>
+      )}
     </div>
   );
 }
@@ -1306,7 +1426,9 @@ function Empty({ text }: any) {
 
 function HarvestTable({ rows, canApprove = false, onApprove, onReject }: any) {
   return (
-    <div className="table-wrap">
+    <>
+      <div className="mobile-scroll-hint">← Swipe horizontally to view full table →</div>
+      <div className="table-wrap">
       <table>
         <thead>
           <tr>
@@ -1344,5 +1466,6 @@ function HarvestTable({ rows, canApprove = false, onApprove, onReject }: any) {
       </table>
       {!rows.length && <Empty text="No harvesting transactions recorded yet." />}
     </div>
+    </>
   );
 }

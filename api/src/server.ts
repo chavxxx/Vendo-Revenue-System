@@ -8,6 +8,8 @@ import { PrismaClient, Role, HarvestStatus, ExpenseStatus, Status } from "@prism
 import { z } from "zod";
 import { exec, execSync } from "child_process";
 import path from "path";
+import fs from "fs";
+import http from "http";
 
 const prisma = new PrismaClient();
 const app = express();
@@ -45,11 +47,44 @@ function pesos(n: number) {
 function roundPeso(n: number) { return Math.floor(n + 0.5); }
 
 function getLocalCommit(): string {
-  try {
-    return execSync("git rev-parse HEAD", { timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
-  } catch {
-    return process.env.GIT_COMMIT || "local";
+  if (process.env.GIT_COMMIT && process.env.GIT_COMMIT !== "local") {
+    return process.env.GIT_COMMIT.trim();
   }
+  try {
+    const gitSha = execSync("git rev-parse HEAD", { timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+    if (gitSha && gitSha.length >= 7) return gitSha;
+  } catch {}
+  try {
+    if (fs.existsSync("/workspace/.git")) {
+      const gitSha = execSync("git -C /workspace rev-parse HEAD", { timeout: 2000, stdio: ["ignore", "pipe", "ignore"] }).toString().trim();
+      if (gitSha && gitSha.length >= 7) return gitSha;
+    }
+  } catch {}
+  const searchPaths = [
+    path.resolve(__dirname, "version.json"),
+    path.resolve(__dirname, "../version.json"),
+    path.resolve(__dirname, "../../version.json"),
+    "/workspace/version.json",
+    "/app/dist/version.json",
+    "/app/version.json",
+    path.resolve(__dirname, "../.git-commit"),
+    path.resolve(__dirname, "../../.git-commit"),
+    "/workspace/.git-commit"
+  ];
+  for (const p of searchPaths) {
+    try {
+      if (fs.existsSync(p)) {
+        if (p.endsWith(".json")) {
+          const data = JSON.parse(fs.readFileSync(p, "utf-8"));
+          if (data.commit) return data.commit.trim();
+        } else {
+          const content = fs.readFileSync(p, "utf-8").trim();
+          if (content) return content;
+        }
+      }
+    } catch {}
+  }
+  return "dev";
 }
 
 async function bootstrap() {
@@ -621,6 +656,29 @@ app.post("/api/system/settings", auth, allow(...adminRoles), async (req, res) =>
   }
 });
 
+function restartDockerContainer(containerName: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (!fs.existsSync("/var/run/docker.sock")) return resolve(false);
+    const req = http.request(
+      {
+        socketPath: "/var/run/docker.sock",
+        path: `/v1.43/containers/${containerName}/restart`,
+        method: "POST"
+      },
+      (res) => resolve(res.statusCode === 204 || res.statusCode === 200)
+    );
+    req.on("error", (e) => {
+      console.warn(`[Updater] Docker socket restart for ${containerName} failed:`, e.message);
+      resolve(false);
+    });
+    req.setTimeout(8000, () => {
+      req.destroy();
+      resolve(false);
+    });
+    req.end();
+  });
+}
+
 // System Version & GitHub Update Checker
 app.get("/api/system/version", auth, async (_req, res) => {
   const commit = getLocalCommit();
@@ -657,19 +715,23 @@ app.get("/api/system/check-updates", auth, async (_req, res) => {
 
     const latest = await resp.json();
     const remoteSha: string = latest.sha || "";
-    const updateAvailable = Boolean(
+    const isSame = Boolean(
       localCommit &&
       remoteSha &&
-      localCommit !== "local" &&
-      !localCommit.startsWith(remoteSha) &&
-      !remoteSha.startsWith(localCommit)
+      localCommit !== "dev" &&
+      (localCommit.toLowerCase().startsWith(remoteSha.toLowerCase()) ||
+       remoteSha.toLowerCase().startsWith(localCommit.toLowerCase()))
     );
+    const updateAvailable = Boolean(remoteSha && !isSame);
 
     res.json({
       currentVersion: APP_VERSION,
       currentCommit: localCommit ? localCommit.slice(0, 7) : "dev",
+      fullCurrentCommit: localCommit,
       latestCommit: remoteSha.slice(0, 7),
+      fullLatestCommit: remoteSha,
       latestMessage: latest.commit?.message?.split("\n")[0] || "",
+      latestAuthor: latest.commit?.author?.name || latest.author?.login || "Maintainer",
       latestDate: latest.commit?.committer?.date || latest.commit?.author?.date,
       updateAvailable,
       repoUrl: `https://github.com/${GITHUB_REPO}`,
@@ -681,15 +743,81 @@ app.get("/api/system/check-updates", auth, async (_req, res) => {
 });
 
 app.post("/api/system/apply-update", auth, allow(Role.SUPER_ADMIN), async (_req, res) => {
-  const updateScript = path.resolve(__dirname, "../../scripts/update.sh");
-  exec(`bash "${updateScript}"`, (error, stdout, stderr) => {
-    if (error) {
-      console.error("Update script failed:", error, stderr);
-    } else {
-      console.log("Update script finished:", stdout);
-    }
+  let projectRoot = "";
+  if (fs.existsSync("/workspace/scripts/update.sh") || fs.existsSync("/workspace/.git")) {
+    projectRoot = "/workspace";
+  } else if (fs.existsSync(path.resolve(__dirname, "../../scripts/update.sh"))) {
+    projectRoot = path.resolve(__dirname, "../..");
+  } else if (fs.existsSync(path.resolve(__dirname, "../scripts/update.sh"))) {
+    projectRoot = path.resolve(__dirname, "..");
+  } else {
+    projectRoot = process.cwd();
+  }
+
+  console.log(`[Updater] Starting update process in root: ${projectRoot}`);
+
+  // Send early HTTP response so UI can show progress immediately
+  res.json({
+    status: "started",
+    message: "Update initiated. Pulling code from GitHub, syncing database, and reloading services."
   });
-  res.json({ status: "started", message: "Update initiated in background. The system will refresh when complete." });
+
+  // Execute update sequence asynchronously
+  setTimeout(async () => {
+    try {
+      try {
+        execSync("git config --global --add safe.directory '*'", { timeout: 5000, stdio: "ignore" });
+      } catch {}
+
+      let gitSuccess = false;
+      try {
+        console.log(`[Updater] Running git fetch and reset to origin/main in ${projectRoot}...`);
+        execSync(`git -C "${projectRoot}" fetch origin main`, { timeout: 60000, stdio: "inherit" });
+        execSync(`git -C "${projectRoot}" reset --hard origin/main`, { timeout: 30000, stdio: "inherit" });
+        gitSuccess = true;
+        console.log(`[Updater] Git update succeeded.`);
+      } catch (e: any) {
+        console.warn(`[Updater] Direct git reset failed (${e.message}), trying update.sh script...`);
+        const updateScript = path.join(projectRoot, "scripts/update.sh");
+        if (fs.existsSync(updateScript)) {
+          try {
+            execSync(`bash "${updateScript}"`, { timeout: 90000, stdio: "inherit" });
+            gitSuccess = true;
+          } catch (shErr: any) {
+            console.error(`[Updater] bash update.sh failed:`, shErr.message);
+          }
+        }
+      }
+
+      // Sync Prisma schema
+      try {
+        console.log(`[Updater] Syncing Prisma database schema...`);
+        const prismaCmd = fs.existsSync("./node_modules/.bin/prisma")
+          ? "./node_modules/.bin/prisma"
+          : fs.existsSync(`${projectRoot}/api/node_modules/.bin/prisma`)
+          ? `${projectRoot}/api/node_modules/.bin/prisma`
+          : "npx prisma";
+        execSync(`${prismaCmd} db push --skip-generate`, { timeout: 45000, stdio: "inherit" });
+        console.log(`[Updater] Database schema sync completed.`);
+      } catch (pErr: any) {
+        console.warn(`[Updater] Prisma db push warning:`, pErr.message);
+      }
+
+      // If Docker socket is mounted, restart Nginx and API containers
+      if (fs.existsSync("/var/run/docker.sock")) {
+        console.log(`[Updater] Restarting vrm-web container...`);
+        await restartDockerContainer("vrm-web");
+        console.log(`[Updater] Restarting vrm-api container...`);
+        await restartDockerContainer("vrm-api");
+      }
+
+      // Also exit current process cleanly so container restart policy or host supervisor refreshes
+      console.log(`[Updater] Process reload scheduled in 1.2s.`);
+      setTimeout(() => process.exit(0), 1200);
+    } catch (err: any) {
+      console.error(`[Updater] Update execution encountered error:`, err);
+    }
+  }, 100);
 });
 
 app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {

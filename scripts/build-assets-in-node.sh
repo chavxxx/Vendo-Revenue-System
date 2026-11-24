@@ -82,6 +82,7 @@ else
   cd "$WEB_DIR"
   npm run build
   test -s dist/index.html
+  cp "$ROOT/version.json" dist/ 2>/dev/null || true
   rm -rf node_modules .vrm-npm-registry-used
   echo "Frontend build completed."
 fi
@@ -103,6 +104,7 @@ else
   echo "===== Compiling API ====="
   npm run build
   test -s dist/server.js
+  cp "$ROOT/version.json" dist/ 2>/dev/null || true
   echo
   echo "===== Removing development-only API dependencies ====="
   npm prune --omit=dev --ignore-scripts --no-audit --no-fund

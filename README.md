@@ -51,17 +51,18 @@ http://<UBUNTU-SERVER-IP>:8080
 
 ## Updating the Application
 
-### Option 1: From the Web Dashboard
-1. Navigate to **Settings** in the sidebar.
-2. Click **Check for Updates**. The system compares your installed commit against `main` on GitHub (`chavxxx/Vendo-Revenue-System`).
-3. If an update is available, click **Apply Update Now**.
+### Option 1: Automatic In-App Updates (One-Click)
+1. The system automatically checks GitHub for updates every 15 minutes and on application launch.
+2. When a newer version is pushed to GitHub, an **Update Available** notification banner appears at the top of the dashboard.
+3. Click **Update from GitHub**. The system pulls the latest code from GitHub `main`, syncs the database schema with Prisma, reloads services, and refreshes the browser with zero data loss.
+4. You can also manually check and trigger updates anytime under **Settings** → **System & GitHub Updates**.
 
 ### Option 2: From the Terminal
 Run the update script directly on the server:
 ```bash
 sudo bash scripts/update.sh
 ```
-This fetches the latest code, applies database schema migrations with Prisma, recompiles frontend/API assets, and restarts the services with zero data loss.
+This fetches the latest code from GitHub `origin/main`, applies database schema migrations, and restarts application containers in seconds.
 
 ---
 
