@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   LayoutDashboard, Coins, Router, MapPin, Users, Receipt, BarChart3,
   Settings, LogOut, Plus, RefreshCw, Search, Wallet, Building2, CalendarDays,
-  CheckCircle2, XCircle, Download, GitBranch, ArrowUpCircle, ShieldCheck, KeyRound, Edit, Trash2
+  CheckCircle2, XCircle, Download, GitBranch, ArrowUpCircle, ShieldCheck, KeyRound, Edit, Trash2,
+  Menu, X, Percent, Sliders
 } from "lucide-react";
 import { ResponsiveContainer, AreaChart, Area, XAxis, YAxis, Tooltip, CartesianGrid } from "recharts";
 
@@ -54,6 +55,14 @@ export default function App() {
   // Expense filter
   const [expenseFilter, setExpenseFilter] = useState("ALL");
 
+  // Mobile navigation drawer
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+
+  // Revenue share settings (percentages)
+  const [shareSettings, setShareSettings] = useState({ ownerPercent: 25, employeePercent: 5, companyPercent: 70 });
+  const [savingShares, setSavingShares] = useState(false);
+  const [sharesSuccess, setSharesSuccess] = useState("");
+
   const isFinance = user?.role === "SUPER_ADMIN" || user?.role === "ADMIN" || user?.role === "FINANCE";
   const isAdmin = user?.role === "SUPER_ADMIN" || user?.role === "ADMIN";
 
@@ -86,7 +95,7 @@ export default function App() {
       const isFin = me.role === "SUPER_ADMIN" || me.role === "ADMIN" || me.role === "FINANCE";
       const isAdm = me.role === "SUPER_ADMIN" || me.role === "ADMIN";
 
-      const [dash, vendos, municipalities, barangays, owners, teams, harvests, users, distributions, allocations, version] = await Promise.all([
+      const [dash, vendos, municipalities, barangays, owners, teams, harvests, users, distributions, allocations, version, shares] = await Promise.all([
         api("/dashboard", token),
         api("/vendos", token),
         api("/municipalities", token),
@@ -97,10 +106,12 @@ export default function App() {
         isAdm ? api("/users", token) : Promise.resolve([]),
         isFin ? api("/distributions", token).catch(() => []) : Promise.resolve([]),
         isFin ? api("/allocations", token).catch(() => []) : Promise.resolve([]),
-        api("/system/version", token).catch(() => null)
+        api("/system/version", token).catch(() => null),
+        api("/system/settings", token).catch(() => null)
       ]);
       setData({ dash, vendos, municipalities, barangays, owners, teams, harvests, users, distributions, allocations });
       if (version) setSystemVersion(version);
+      if (shares) setShareSettings(shares);
     } catch (e: any) {
       if (e.status === 401 || e.message?.toLowerCase().includes("token") || e.message?.toLowerCase().includes("authentication")) {
         logout();
@@ -111,6 +122,30 @@ export default function App() {
       setBusy(false);
     }
   };
+
+  async function saveShareSettings(e: React.FormEvent) {
+    e.preventDefault();
+    setSavingShares(true);
+    setSharesSuccess("");
+    setError("");
+    try {
+      const res = await api("/system/settings", token, {
+        method: "POST",
+        body: JSON.stringify({
+          ownerPercent: Number(shareSettings.ownerPercent),
+          employeePercent: Number(shareSettings.employeePercent)
+        })
+      });
+      setShareSettings(res);
+      setSharesSuccess("Revenue share percentages updated successfully.");
+      setTimeout(() => setSharesSuccess(""), 4000);
+      await load();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setSavingShares(false);
+    }
+  }
 
   const loadDetailedReport = async () => {
     if (!token) return;
@@ -200,7 +235,7 @@ export default function App() {
           name: form.name,
           barangayId: form.barangayId || null,
           ownerId: form.ownerId || null,
-          ownerPercent: Number(form.ownerPercent || 25),
+          ownerPercent: Number(form.ownerPercent !== undefined && form.ownerPercent !== "" ? form.ownerPercent : shareSettings.ownerPercent),
           notes: form.notes || undefined,
           status: form.status
         };
@@ -253,6 +288,14 @@ export default function App() {
             employeeId: form.employeeId,
             amount: Number(form.amount),
             note: form.note || undefined
+          })
+        });
+      } else if (modal === "editDistribution") {
+        await api(`/distributions/${form.id}`, token, {
+          method: "PUT",
+          body: JSON.stringify({
+            ownerPercent: Number(form.ownerPercent),
+            employeePercent: Number(form.employeePercent)
           })
         });
       } else if (modal === "changePassword") {
@@ -407,14 +450,18 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <aside className="sidebar">
+      {/* Mobile Drawer Overlay */}
+      {mobileNavOpen && <div className="sidebar-overlay" onClick={() => setMobileNavOpen(false)} />}
+
+      <aside className={`sidebar ${mobileNavOpen ? "open" : ""}`}>
         <div className="brand">
           <div className="brand-mark"><Coins size={22} /></div>
           <div><b>Vendo Revenue</b><small>MANAGEMENT SYSTEM</small></div>
+          <button className="mobile-close-btn" onClick={() => setMobileNavOpen(false)} aria-label="Close menu"><X size={18} /></button>
         </div>
         <div className="nav-label">WORKSPACE</div>
         {nav.map(([n, I]) => (
-          <button key={n} onClick={() => setPage(n)} className={`nav-item ${page === n ? "active" : ""}`}>
+          <button key={n} onClick={() => { setPage(n); setMobileNavOpen(false); }} className={`nav-item ${page === n ? "active" : ""}`}>
             <I size={18} />{n}
           </button>
         ))}
@@ -429,13 +476,18 @@ export default function App() {
 
       <main className="main">
         <header className="topbar">
-          <div>
-            <div className="eyebrow">BUSINESS OVERVIEW / {page.toUpperCase()}</div>
-            <h2>{page}</h2>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <button className="mobile-menu-btn" onClick={() => setMobileNavOpen(true)} aria-label="Open menu">
+              <Menu size={22} />
+            </button>
+            <div>
+              <div className="eyebrow">BUSINESS OVERVIEW / {page.toUpperCase()}</div>
+              <h2>{page}</h2>
+            </div>
           </div>
           <div className="top-actions">
             <span className="live-dot">● System online</span>
-            {systemVersion && <span style={{ fontSize: 11, color: "#78879e" }}>v{systemVersion.version} ({systemVersion.commit})</span>}
+            {systemVersion && <span className="version-tag" style={{ fontSize: 11, color: "#78879e" }}>v{systemVersion.version} ({systemVersion.commit})</span>}
             <button className="icon-btn" onClick={load} title="Refresh data"><RefreshCw size={17} /></button>
             <div className="avatar">{user?.name?.[0] || "A"}</div>
           </div>
@@ -750,7 +802,8 @@ export default function App() {
                     <th>VLAN</th>
                     <th>Gross</th>
                     <th>Net</th>
-                    <th>Employee Pool (5%)</th>
+                    <th>Owner Share</th>
+                    <th>Employee Pool</th>
                     <th>Allocated</th>
                     <th>Remaining Pool</th>
                     {isFinance && <th>Action</th>}
@@ -766,24 +819,41 @@ export default function App() {
                         <td>{dist.harvestItem?.vendo?.vlanId ? `VLAN ${dist.harvestItem.vendo.vlanId}` : "—"}</td>
                         <td>{money(dist.gross)}</td>
                         <td>{money(dist.netAfterExpenses)}</td>
-                        <td><b>{money(dist.employeePool)}</b></td>
+                        <td>{money(dist.ownerShare)} <small style={{ color: "#78879e" }}>({dist.ownerPercent}%)</small></td>
+                        <td><b>{money(dist.employeePool)}</b> <small style={{ color: "#78879e" }}>({dist.employeePercent}%)</small></td>
                         <td>{money(allocatedTotal)}</td>
                         <td><b style={{ color: remaining > 0 ? "#16845a" : "#8a95a7" }}>{money(remaining)}</b></td>
                         {isFinance && (
                           <td>
-                            {remaining > 0 ? (
+                            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                              {remaining > 0 ? (
+                                <button
+                                  className="primary small"
+                                  onClick={() => {
+                                    setModal("allocation");
+                                    setForm({ distributionId: dist.id, maxAmount: remaining, amount: remaining });
+                                  }}
+                                >
+                                  Allocate Share
+                                </button>
+                              ) : (
+                                <span className="status">Allocated</span>
+                              )}
                               <button
-                                className="primary small"
+                                className="btn-action"
                                 onClick={() => {
-                                  setModal("allocation");
-                                  setForm({ distributionId: dist.id, maxAmount: remaining, amount: remaining });
+                                  setModal("editDistribution");
+                                  setForm({
+                                    id: dist.id,
+                                    ownerPercent: dist.ownerPercent || 25,
+                                    employeePercent: dist.employeePercent || 5
+                                  });
                                 }}
+                                title="Adjust share percentages"
                               >
-                                Allocate Share
+                                Edit %
                               </button>
-                            ) : (
-                              <span className="status">Fully allocated</span>
-                            )}
+                            </div>
                           </td>
                         )}
                       </tr>
@@ -864,8 +934,8 @@ export default function App() {
                     <th>Gross</th>
                     <th>Expenses</th>
                     <th>Net</th>
-                    <th>Owner (25%)</th>
-                    <th>Employee (5%)</th>
+                    <th>Owner ({shareSettings.ownerPercent}%)</th>
+                    <th>Employee ({shareSettings.employeePercent}%)</th>
                     <th>Company Share</th>
                   </tr>
                 </thead>
@@ -968,9 +1038,94 @@ export default function App() {
               </form>
             </section>
 
+            {isAdmin && (
+              <section className="panel">
+                <div className="panel-head">
+                  <div>
+                    <h3 style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <Percent size={18} style={{ color: "#2563d9" }} /> Revenue Share Configuration
+                    </h3>
+                    <p>Customize default percentage shares for location owners and employee pools</p>
+                  </div>
+                </div>
+
+                <form onSubmit={saveShareSettings} style={{ maxWidth: 540 }}>
+                  <div className="field-grid">
+                    <div className="field">
+                      <label>Default Location Owner Share (%)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={shareSettings.ownerPercent}
+                        onChange={e => {
+                          const val = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                          setShareSettings(s => ({ ...s, ownerPercent: val }));
+                        }}
+                        required
+                      />
+                      <small style={{ color: "#78879e", fontSize: 10 }}>Can also be customized per machine in the Vendo Registry.</small>
+                    </div>
+
+                    <div className="field">
+                      <label>Employee Pool Share (%)</label>
+                      <input
+                        type="number"
+                        min="0"
+                        max="100"
+                        value={shareSettings.employeePercent}
+                        onChange={e => {
+                          const val = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                          setShareSettings(s => ({ ...s, employeePercent: val }));
+                        }}
+                        required
+                      />
+                      <small style={{ color: "#78879e", fontSize: 10 }}>Calculated from residual net revenue after owner share.</small>
+                    </div>
+                  </div>
+
+                  {/* Visual Breakdown Preview */}
+                  <div style={{ background: "#f8faff", border: "1px solid #e1e9f4", borderRadius: 10, padding: 14, margin: "14px 0" }}>
+                    <div style={{ fontSize: 11, fontWeight: 700, color: "#475569", marginBottom: 8, display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 4 }}>
+                      <span>PREVIEW: NET REVENUE DISTRIBUTION (Per ₱100 Net)</span>
+                      <span>Company Share: ~{Math.max(0, (100 - shareSettings.ownerPercent) - Math.round((100 - shareSettings.ownerPercent) * (shareSettings.employeePercent / 100)))}%</span>
+                    </div>
+
+                    <div style={{ height: 14, display: "flex", borderRadius: 6, overflow: "hidden", background: "#e2e8f0" }}>
+                      <div style={{ width: `${shareSettings.ownerPercent}%`, background: "#3b82f6" }} title={`Owner: ${shareSettings.ownerPercent}%`} />
+                      <div style={{ width: `${Math.round((100 - shareSettings.ownerPercent) * (shareSettings.employeePercent / 100))}%`, background: "#8b5cf6" }} title={`Employees: ~${Math.round((100 - shareSettings.ownerPercent) * (shareSettings.employeePercent / 100))}%`} />
+                      <div style={{ flex: 1, background: "#10b981" }} title="Company Share" />
+                    </div>
+
+                    <div style={{ display: "flex", gap: 16, marginTop: 10, fontSize: 11, flexWrap: "wrap" }}>
+                      <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <span style={{ width: 10, height: 10, borderRadius: 2, background: "#3b82f6", display: "inline-block" }} />
+                        Location Owner: <b>{shareSettings.ownerPercent}%</b>
+                      </span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <span style={{ width: 10, height: 10, borderRadius: 2, background: "#8b5cf6", display: "inline-block" }} />
+                        Employee Pool: <b>{shareSettings.employeePercent}%</b> (~₱{Math.round((100 - shareSettings.ownerPercent) * (shareSettings.employeePercent / 100))} per ₱100)
+                      </span>
+                      <span style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                        <span style={{ width: 10, height: 10, borderRadius: 2, background: "#10b981", display: "inline-block" }} />
+                        Company Share: <b>~{Math.max(0, (100 - shareSettings.ownerPercent) - Math.round((100 - shareSettings.ownerPercent) * (shareSettings.employeePercent / 100)))}%</b>
+                      </span>
+                    </div>
+                  </div>
+
+                  <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                    <button className="primary" disabled={savingShares}>
+                      <Sliders size={16} /> {savingShares ? "Saving..." : "Save Share Settings"}
+                    </button>
+                    {sharesSuccess && <span style={{ fontSize: 12, color: "#198451", fontWeight: 600 }}>✓ {sharesSuccess}</span>}
+                  </div>
+                </form>
+              </section>
+            )}
+
             <section className="panel">
               <h3>System Accounting Rules</h3>
-              <p className="muted">Default currency: PHP (₱). Whole-peso accounting. Expenses deducted from gross before distribution. Location owner: 25%. Employee pool: 5% of residual. Company share: remaining net revenue. Employee share distribution: manual allocation.</p>
+              <p className="muted">Default currency: PHP (₱). Whole-peso accounting. Expenses deducted from gross before distribution. Location owner: {shareSettings.ownerPercent}%. Employee pool: {shareSettings.employeePercent}% of residual. Company share: remaining net revenue. Employee share distribution: manual allocation.</p>
             </section>
           </>
         )}
@@ -989,7 +1144,8 @@ export default function App() {
                   team: form.id ? "Edit harvesting team" : "Create harvesting team",
                   user: form.id ? "Edit user account" : "Create user account",
                   harvest: "Record coin harvest",
-                  allocation: "Allocate employee share"
+                  allocation: "Allocate employee share",
+                  editDistribution: "Adjust revenue distribution shares"
                 } as any)[modal]}
               </h3>
               <button type="button" onClick={() => setModal("")}>×</button>
@@ -1073,6 +1229,15 @@ export default function App() {
                   type="number"
                 />
                 <Field label="Note (optional)" name="note" form={form} set={setForm} placeholder="e.g. November performance share" />
+              </>
+            )}
+            {modal === "editDistribution" && (
+              <>
+                <p style={{ fontSize: 12, color: "#64748b", margin: "0 0 14px" }}>
+                  Customize the percentage shares for this harvest item. Whole-peso distribution amounts are recalculated immediately.
+                </p>
+                <Field label="Location Owner Share (%)" name="ownerPercent" form={form} set={setForm} type="number" />
+                <Field label="Employee Pool Share (%)" name="employeePercent" form={form} set={setForm} type="number" />
               </>
             )}
 

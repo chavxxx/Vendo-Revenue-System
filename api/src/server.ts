@@ -196,6 +196,23 @@ app.delete("/api/owners/:id", auth, allow(...adminRoles), async (req, res) => {
   } catch (e: any) { res.status(400).json({ error: e.message }); }
 });
 
+// Revenue Share Settings Helper
+async function getRevenueShareSettings() {
+  try {
+    const settings = await prisma.systemSetting.findMany({
+      where: { key: { in: ["default_owner_percent", "default_employee_percent"] } }
+    });
+    const map = new Map(settings.map(s => [s.key, s.value]));
+    const ownerPercent = parseInt(map.get("default_owner_percent") || "25", 10) || 25;
+    const employeePercent = parseInt(map.get("default_employee_percent") || "5", 10) || 5;
+    const remaining = 100 - ownerPercent;
+    const companyPercent = Math.max(0, remaining - Math.round(remaining * (employeePercent / 100)));
+    return { ownerPercent, employeePercent, companyPercent };
+  } catch {
+    return { ownerPercent: 25, employeePercent: 5, companyPercent: 71 };
+  }
+}
+
 // Vendos
 app.get("/api/vendos", auth, async (_req, res) => res.json(await prisma.vendo.findMany({ include: { barangay: { include: { municipality: true } }, owner: true }, orderBy: { vlanId: "asc" } })));
 app.post("/api/vendos", auth, allow(...adminRoles), async (req, res) => {
@@ -204,13 +221,15 @@ app.post("/api/vendos", auth, allow(...adminRoles), async (req, res) => {
     name: z.string().trim().min(1),
     barangayId: z.string().optional().nullable(),
     ownerId: z.string().optional().nullable(),
-    ownerPercent: z.coerce.number().int().min(0).max(100).default(25),
+    ownerPercent: z.coerce.number().int().min(0).max(100).optional(),
     notes: z.string().optional()
   }).safeParse(req.body);
   if (!p.success) return res.status(400).json({ error: "Invalid vendo data", details: p.error.flatten() });
   try {
+    const defaults = await getRevenueShareSettings();
     const data = {
       ...p.data,
+      ownerPercent: p.data.ownerPercent !== undefined ? p.data.ownerPercent : defaults.ownerPercent,
       barangayId: p.data.barangayId ? p.data.barangayId : null,
       ownerId: p.data.ownerId ? p.data.ownerId : null,
     };
@@ -369,6 +388,7 @@ app.get("/api/harvests", auth, async (req, res) => {
 app.post("/api/harvests/:id/approve", auth, allow(...financeRoles), async (req, res) => {
   try {
     const id = req.params.id as string;
+    const sysSettings = await getRevenueShareSettings();
     const result = await prisma.$transaction(async tx => {
       const h = await tx.harvest.findUnique({ where: { id }, include: { items: { include: { expenses: true, vendo: true } } } });
       if (!h) throw new Error("Harvest not found");
@@ -381,16 +401,17 @@ app.post("/api/harvests/:id/approve", auth, allow(...financeRoles), async (req, 
         const approvedExpenses = item.expenses.filter((e: any) => e.status === ExpenseStatus.APPROVED || e.status === ExpenseStatus.PENDING).reduce((s: number, e: any) => s + e.amount, 0);
         const net = item.gross - approvedExpenses;
         if (net < 0) throw new Error(`Expenses exceed gross collection for VLAN ${item.vendo.vlanId}`);
-        const ownerPercent = item.vendo.ownerPercent;
+        const ownerPercent = req.body?.ownerPercent !== undefined ? Number(req.body.ownerPercent) : (item.vendo.ownerPercent || sysSettings.ownerPercent);
+        const employeePercent = req.body?.employeePercent !== undefined ? Number(req.body.employeePercent) : sysSettings.employeePercent;
         const ownerExact = net * ownerPercent / 100;
         const ownerShare = roundPeso(ownerExact);
         const remaining = net - ownerShare;
-        const employeePool = roundPeso(remaining * 0.05);
+        const employeePool = roundPeso(remaining * (employeePercent / 100));
         const companyShare = remaining - employeePool;
         items.push(await tx.distribution.upsert({
           where: { harvestItemId: item.id },
-          create: { harvestItemId: item.id, gross: item.gross, approvedExpenses, netAfterExpenses: net, ownerPercent, ownerShare, employeePercent: 5, employeePool, companyShare },
-          update: { gross: item.gross, approvedExpenses, netAfterExpenses: net, ownerPercent, ownerShare, employeePercent: 5, employeePool, companyShare }
+          create: { harvestItemId: item.id, gross: item.gross, approvedExpenses, netAfterExpenses: net, ownerPercent, ownerShare, employeePercent, employeePool, companyShare },
+          update: { gross: item.gross, approvedExpenses, netAfterExpenses: net, ownerPercent, ownerShare, employeePercent, employeePool, companyShare }
         }));
       }
       await tx.harvest.update({ where: { id: h.id }, data: { status: HarvestStatus.APPROVED, approvedAt: new Date() } });
@@ -530,6 +551,74 @@ app.post("/api/distributions/:id/allocations", auth, allow(Role.SUPER_ADMIN, Rol
     });
     res.status(201).json(allocation);
   } catch (e:any) { res.status(400).json({ error: e.message }); }
+});
+
+// Update distribution percentages and recalculate shares
+app.put("/api/distributions/:id", auth, allow(...financeRoles), async (req, res) => {
+  const id = req.params.id as string;
+  const p = z.object({
+    ownerPercent: z.coerce.number().int().min(0).max(100).optional(),
+    employeePercent: z.coerce.number().int().min(0).max(100).optional()
+  }).safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "Invalid distribution share data" });
+  try {
+    const dist = await prisma.distribution.findUnique({ where: { id } });
+    if (!dist) return res.status(404).json({ error: "Distribution record not found" });
+
+    const ownerPercent = p.data.ownerPercent !== undefined ? p.data.ownerPercent : dist.ownerPercent;
+    const employeePercent = p.data.employeePercent !== undefined ? p.data.employeePercent : dist.employeePercent;
+    const net = dist.netAfterExpenses;
+    const ownerExact = net * ownerPercent / 100;
+    const ownerShare = roundPeso(ownerExact);
+    const remaining = net - ownerShare;
+    const employeePool = roundPeso(remaining * (employeePercent / 100));
+    const companyShare = remaining - employeePool;
+
+    const updated = await prisma.distribution.update({
+      where: { id },
+      data: {
+        ownerPercent,
+        ownerShare,
+        employeePercent,
+        employeePool,
+        companyShare
+      }
+    });
+    res.json(updated);
+  } catch (e: any) { res.status(400).json({ error: e.message }); }
+});
+
+// System Revenue Share Settings
+app.get("/api/system/settings", auth, async (_req, res) => {
+  const shares = await getRevenueShareSettings();
+  res.json(shares);
+});
+
+app.post("/api/system/settings", auth, allow(...adminRoles), async (req, res) => {
+  const p = z.object({
+    ownerPercent: z.coerce.number().int().min(0).max(100),
+    employeePercent: z.coerce.number().int().min(0).max(100)
+  }).safeParse(req.body);
+  if (!p.success) return res.status(400).json({ error: "Invalid share percentages", details: p.error.flatten() });
+
+  try {
+    await prisma.$transaction([
+      prisma.systemSetting.upsert({
+        where: { key: "default_owner_percent" },
+        create: { key: "default_owner_percent", value: p.data.ownerPercent.toString() },
+        update: { value: p.data.ownerPercent.toString() }
+      }),
+      prisma.systemSetting.upsert({
+        where: { key: "default_employee_percent" },
+        create: { key: "default_employee_percent", value: p.data.employeePercent.toString() },
+        update: { value: p.data.employeePercent.toString() }
+      })
+    ]);
+    const updated = await getRevenueShareSettings();
+    res.json(updated);
+  } catch (e: any) {
+    res.status(500).json({ error: e.message });
+  }
 });
 
 // System Version & GitHub Update Checker
