@@ -186,6 +186,39 @@ docker run --rm \
 say "Building application images (no npm downloads in Dockerfiles)"
 docker compose --progress plain build --no-cache api web
 
+say "Starting PostgreSQL and syncing database credentials"
+docker compose up -d db
+for attempt in $(seq 1 30); do
+  if docker compose exec -T db pg_isready -U "${POSTGRES_USER:-vendo}" -d "${POSTGRES_DB:-vendo}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
+python3 - <<'PY'
+import subprocess
+from pathlib import Path
+
+env = {}
+for line in Path(".env").read_text().splitlines():
+    s = line.strip()
+    if s and not s.startswith("#") and "=" in s:
+        k, v = s.split("=", 1)
+        env[k.strip()] = v.strip()
+
+user = env.get("POSTGRES_USER", "vendo")
+db = env.get("POSTGRES_DB", "vendo")
+pw = env.get("POSTGRES_PASSWORD", "")
+if pw:
+    pw_sql = pw.replace("'", "''")
+    user_ident = user.replace('"', '""')
+    sql = f'ALTER USER "{user_ident}" WITH PASSWORD \'{pw_sql}\';'
+    subprocess.run(
+        ["docker", "compose", "exec", "-T", "db", "psql", "-U", user, "-d", db, "-c", sql],
+        check=False,
+    )
+PY
+
 say "Starting PostgreSQL, API, and web frontend"
 docker compose up -d
 
