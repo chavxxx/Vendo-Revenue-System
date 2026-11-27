@@ -33,23 +33,33 @@ enum ExpenseStatus {
   REJECTED
 }
 
+enum RemittanceType {
+  BANK_DEPOSIT
+  REMIT_TO_OWNER
+}
+
 model User {
   id           String   @id @default(cuid())
   name         String
   email        String   @unique
   passwordHash String
   role         Role     @default(ENCODER)
+  permissions  Json?
   status       Status   @default(ACTIVE)
   createdAt    DateTime @default(now())
   harvests     Harvest[] @relation("EncodedHarvests")
+  expenses     Expense[] @relation("EncodedExpenses")
+  remittances  Remittance[] @relation("RecordedRemittances")
   allocations  EmployeeAllocation[]
 }
 
 model Municipality {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  createdAt DateTime @default(now())
-  barangays Barangay[]
+  id          String   @id @default(cuid())
+  name        String   @unique
+  createdAt   DateTime @default(now())
+  barangays   Barangay[]
+  expenses    Expense[]
+  remittances Remittance[]
 }
 
 model Barangay {
@@ -71,7 +81,8 @@ model LocationOwner {
 
 model Vendo {
   id             String        @id @default(cuid())
-  vlanId         Int           @unique
+  ipAddress      String?       @unique
+  vlanId         Int?          @unique
   name           String
   barangayId     String?
   barangay       Barangay?     @relation(fields: [barangayId], references: [id])
@@ -85,11 +96,13 @@ model Vendo {
 }
 
 model HarvestTeam {
-  id        String   @id @default(cuid())
-  name      String   @unique
-  leader    String?
-  status    Status   @default(ACTIVE)
-  harvests  Harvest[]
+  id              String       @id @default(cuid())
+  name            String       @unique
+  leader          String?
+  employeePercent Int?
+  status          Status       @default(ACTIVE)
+  harvests        Harvest[]
+  remittances     Remittance[]
 }
 
 model Harvest {
@@ -130,14 +143,37 @@ model CoinCount {
 }
 
 model Expense {
-  id            String        @id @default(cuid())
-  harvestItemId String
-  harvestItem   HarvestItem   @relation(fields: [harvestItemId], references: [id], onDelete: Cascade)
-  category      String
-  description   String?
-  amount        Int
-  status        ExpenseStatus @default(PENDING)
-  createdAt     DateTime      @default(now())
+  id             String        @id @default(cuid())
+  harvestItemId  String?
+  harvestItem    HarvestItem?  @relation(fields: [harvestItemId], references: [id], onDelete: Cascade)
+  municipalityId String?
+  municipality   Municipality? @relation(fields: [municipalityId], references: [id])
+  encoderId      String?
+  encoder        User?         @relation("EncodedExpenses", fields: [encoderId], references: [id])
+  category       String
+  description    String?
+  amount         Int
+  incurredAt     DateTime      @default(now())
+  status         ExpenseStatus @default(PENDING)
+  createdAt      DateTime      @default(now())
+}
+
+model Remittance {
+  id             String         @id @default(cuid())
+  reference      String         @unique
+  type           RemittanceType
+  amount         Int
+  remittedAt     DateTime
+  municipalityId String?
+  municipality   Municipality?  @relation(fields: [municipalityId], references: [id])
+  teamId         String?
+  team           HarvestTeam?   @relation(fields: [teamId], references: [id])
+  recordedById   String
+  recordedBy     User           @relation("RecordedRemittances", fields: [recordedById], references: [id])
+  bankOrChannel  String?
+  notes          String?
+  slipImage      String?
+  createdAt      DateTime       @default(now())
 }
 
 model Distribution {
@@ -172,4 +208,3 @@ model SystemSetting {
   value     String
   updatedAt DateTime @updatedAt
 }
-

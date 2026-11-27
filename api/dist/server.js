@@ -19,16 +19,103 @@ const prisma = new client_1.PrismaClient();
 const app = (0, express_1.default)();
 app.use((0, helmet_1.default)());
 app.use((0, cors_1.default)({ origin: process.env.CORS_ORIGIN === "*" ? true : process.env.CORS_ORIGIN?.split(",") }));
-app.use(express_1.default.json({ limit: "5mb" }));
+app.use(express_1.default.json({ limit: "10mb" }));
 const JWT_SECRET = process.env.JWT_SECRET || "vrm-fallback-secret-development-only-change-in-production";
 const APP_VERSION = "1.0.0";
 const GITHUB_REPO = process.env.GITHUB_REPO || "chavxxx/Vendo-Revenue-System";
-function auth(req, res, next) {
+const ALL_PERMS_TRUE = {
+    viewDashboard: true,
+    encodeHarvest: true,
+    editHarvest: true,
+    approveHarvest: true,
+    manageVendos: true,
+    manageLocations: true,
+    manageTeams: true,
+    manageExpenses: true,
+    manageRemittances: true,
+    viewReports: true,
+    manageUsers: true,
+    manageSettings: true
+};
+const ROLE_DEFAULT_PERMS = {
+    SUPER_ADMIN: { ...ALL_PERMS_TRUE },
+    ADMIN: { ...ALL_PERMS_TRUE },
+    FINANCE: {
+        viewDashboard: true,
+        encodeHarvest: false,
+        editHarvest: false,
+        approveHarvest: true,
+        manageVendos: false,
+        manageLocations: false,
+        manageTeams: false,
+        manageExpenses: true,
+        manageRemittances: true,
+        viewReports: true,
+        manageUsers: false,
+        manageSettings: false
+    },
+    ENCODER: {
+        viewDashboard: true,
+        encodeHarvest: true,
+        editHarvest: false,
+        approveHarvest: false,
+        manageVendos: true,
+        manageLocations: false,
+        manageTeams: false,
+        manageExpenses: true,
+        manageRemittances: false,
+        viewReports: false,
+        manageUsers: false,
+        manageSettings: false
+    },
+    HARVESTER: {
+        viewDashboard: true,
+        encodeHarvest: true,
+        editHarvest: false,
+        approveHarvest: false,
+        manageVendos: false,
+        manageLocations: false,
+        manageTeams: false,
+        manageExpenses: true,
+        manageRemittances: true,
+        viewReports: false,
+        manageUsers: false,
+        manageSettings: false
+    }
+};
+function resolvePermissions(role, custom) {
+    if (role === client_1.Role.SUPER_ADMIN)
+        return { ...ALL_PERMS_TRUE };
+    const base = ROLE_DEFAULT_PERMS[role] || ROLE_DEFAULT_PERMS.HARVESTER;
+    if (custom && typeof custom === "object") {
+        const out = { ...base };
+        for (const k of Object.keys(ALL_PERMS_TRUE)) {
+            if (typeof custom[k] === "boolean")
+                out[k] = custom[k];
+        }
+        return out;
+    }
+    return { ...base };
+}
+async function auth(req, res, next) {
     const token = req.headers.authorization?.replace(/^Bearer\s+/i, "");
     if (!token)
         return res.status(401).json({ error: "Authentication required" });
     try {
-        req.user = jsonwebtoken_1.default.verify(token, JWT_SECRET);
+        const decoded = jsonwebtoken_1.default.verify(token, JWT_SECRET);
+        const dbUser = await prisma.user.findUnique({
+            where: { id: decoded.id },
+            select: { id: true, role: true, email: true, status: true, permissions: true }
+        });
+        if (!dbUser || dbUser.status !== client_1.Status.ACTIVE) {
+            return res.status(401).json({ error: "Account inactive or not found" });
+        }
+        req.user = {
+            id: dbUser.id,
+            role: dbUser.role,
+            email: dbUser.email,
+            permissions: resolvePermissions(dbUser.role, dbUser.permissions)
+        };
         next();
     }
     catch {
@@ -40,6 +127,15 @@ function allow(...roles) {
         if (!req.user || !roles.includes(req.user.role))
             return res.status(403).json({ error: "Insufficient permissions" });
         next();
+    };
+}
+function requirePerm(perm) {
+    return (req, res, next) => {
+        if (!req.user)
+            return res.status(401).json({ error: "Authentication required" });
+        if (req.user.role === client_1.Role.SUPER_ADMIN || req.user.permissions?.[perm])
+            return next();
+        return res.status(403).json({ error: `Permission denied: requires ${perm}` });
     };
 }
 const adminRoles = [client_1.Role.SUPER_ADMIN, client_1.Role.ADMIN];
@@ -127,17 +223,61 @@ app.post("/api/auth/login", async (req, res) => {
     const parsed = zod_1.z.object({ email: zod_1.z.string().email(), password: zod_1.z.string().min(1) }).safeParse(req.body);
     if (!parsed.success)
         return res.status(400).json({ error: "Valid email and password required" });
-    const user = await prisma.user.findUnique({ where: { email: parsed.data.email } });
+    const emailLower = parsed.data.email.trim().toLowerCase();
+    const user = await prisma.user.findFirst({ where: { email: { equals: emailLower, mode: "insensitive" } } });
     if (!user || user.status !== client_1.Status.ACTIVE || !(await bcryptjs_1.default.compare(parsed.data.password, user.passwordHash)))
         return res.status(401).json({ error: "Invalid credentials" });
     const token = jsonwebtoken_1.default.sign({ id: user.id, role: user.role, email: user.email }, JWT_SECRET, { expiresIn: "12h" });
-    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role } });
+    const permissions = resolvePermissions(user.role, user.permissions);
+    res.json({ token, user: { id: user.id, name: user.name, email: user.email, role: user.role, permissions } });
 });
 app.get("/api/me", auth, async (req, res) => {
-    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { id: true, name: true, email: true, role: true } });
+    const user = await prisma.user.findUnique({ where: { id: req.user.id }, select: { id: true, name: true, email: true, role: true, permissions: true } });
     if (!user)
         return res.status(401).json({ error: "User not found" });
-    res.json(user);
+    res.json({ id: user.id, name: user.name, email: user.email, role: user.role, permissions: resolvePermissions(user.role, user.permissions) });
+});
+// Public Branding Endpoint (used on login page & app shell)
+app.get("/api/system/branding", async (_req, res) => {
+    try {
+        const rows = await prisma.systemSetting.findMany({
+            where: { key: { in: ["company_name", "company_logo"] } }
+        });
+        const map = new Map(rows.map(r => [r.key, r.value]));
+        res.json({
+            companyName: map.get("company_name") || "Vendo Revenue",
+            companyLogo: map.get("company_logo") || ""
+        });
+    }
+    catch {
+        res.json({ companyName: "Vendo Revenue", companyLogo: "" });
+    }
+});
+app.post("/api/system/branding", auth, requirePerm("manageSettings"), async (req, res) => {
+    const p = zod_1.z.object({
+        companyName: zod_1.z.string().trim().min(1).max(80),
+        companyLogo: zod_1.z.string().max(2_500_000).optional().nullable()
+    }).safeParse(req.body);
+    if (!p.success)
+        return res.status(400).json({ error: "Invalid branding data (company name required, logo max ~2MB)" });
+    try {
+        await prisma.$transaction([
+            prisma.systemSetting.upsert({
+                where: { key: "company_name" },
+                create: { key: "company_name", value: p.data.companyName },
+                update: { value: p.data.companyName }
+            }),
+            prisma.systemSetting.upsert({
+                where: { key: "company_logo" },
+                create: { key: "company_logo", value: p.data.companyLogo || "" },
+                update: { value: p.data.companyLogo || "" }
+            })
+        ]);
+        res.json({ companyName: p.data.companyName, companyLogo: p.data.companyLogo || "" });
+    }
+    catch (e) {
+        res.status(500).json({ error: e.message });
+    }
 });
 app.post("/api/auth/change-password", auth, async (req, res) => {
     const p = zod_1.z.object({
@@ -292,10 +432,104 @@ async function getRevenueShareSettings() {
     }
 }
 // Vendos
-app.get("/api/vendos", auth, async (_req, res) => res.json(await prisma.vendo.findMany({ include: { barangay: { include: { municipality: true } }, owner: true }, orderBy: { vlanId: "asc" } })));
-app.post("/api/vendos", auth, allow(...adminRoles), async (req, res) => {
+app.get("/api/vendos", auth, async (req, res) => {
+    const municipalityId = req.query.municipalityId ? String(req.query.municipalityId) : "";
+    const where = {};
+    if (municipalityId) {
+        where.barangay = { municipalityId };
+    }
+    const rows = await prisma.vendo.findMany({
+        where,
+        include: { barangay: { include: { municipality: true } }, owner: true },
+        orderBy: [{ ipAddress: "asc" }, { vlanId: "asc" }, { name: "asc" }]
+    });
+    res.json(rows);
+});
+app.get("/api/vendos/monthly-status", auth, async (req, res) => {
+    try {
+        const now = new Date();
+        const monthStr = req.query.month ? String(req.query.month) : `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+        const [yr, mo] = monthStr.split("-").map(Number);
+        const monthStart = new Date(yr || now.getFullYear(), (mo || now.getMonth() + 1) - 1, 1);
+        const monthEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0, 23, 59, 59, 999);
+        const municipalityId = req.query.municipalityId ? String(req.query.municipalityId) : "";
+        const vendoWhere = { status: client_1.Status.ACTIVE };
+        if (municipalityId)
+            vendoWhere.barangay = { municipalityId };
+        const [vendos, items] = await Promise.all([
+            prisma.vendo.findMany({
+                where: vendoWhere,
+                include: { barangay: { include: { municipality: true } }, owner: true },
+                orderBy: [{ ipAddress: "asc" }, { name: "asc" }]
+            }),
+            prisma.harvestItem.findMany({
+                where: { harvest: { status: { not: client_1.HarvestStatus.REJECTED } } },
+                include: { harvest: { select: { harvestedAt: true, status: true, reference: true } } },
+                orderBy: { harvest: { harvestedAt: "desc" } }
+            })
+        ]);
+        const itemsByVendo = new Map();
+        for (const item of items) {
+            const arr = itemsByVendo.get(item.vendoId) || [];
+            arr.push(item);
+            itemsByVendo.set(item.vendoId, arr);
+        }
+        const unharvested = [];
+        const newThisMonth = [];
+        let harvestedCount = 0;
+        for (const v of vendos) {
+            const vItems = itemsByVendo.get(v.id) || [];
+            const thisMonthItems = vItems.filter(i => i.harvest.harvestedAt >= monthStart && i.harvest.harvestedAt <= monthEnd);
+            const priorItems = vItems.filter(i => i.harvest.harvestedAt < monthStart);
+            const lastItem = vItems[0] || null;
+            const thisMonthGross = thisMonthItems.reduce((s, i) => s + i.gross, 0);
+            const harvestedThisMonth = thisMonthItems.length > 0;
+            const createdInMonth = v.createdAt >= monthStart && v.createdAt <= monthEnd;
+            const isNewThisMonth = (harvestedThisMonth && priorItems.length === 0) || (createdInMonth && priorItems.length === 0);
+            if (harvestedThisMonth)
+                harvestedCount++;
+            const summary = {
+                id: v.id,
+                ipAddress: v.ipAddress,
+                vlanId: v.vlanId,
+                name: v.name,
+                municipality: v.barangay?.municipality?.name || "—",
+                municipalityId: v.barangay?.municipalityId || null,
+                barangay: v.barangay?.name || "—",
+                owner: v.owner?.name || "—",
+                ownerPhone: v.owner?.phone || null,
+                harvestedThisMonth,
+                isNewThisMonth,
+                thisMonthGross,
+                lastHarvestAt: lastItem?.harvest.harvestedAt || null,
+                lastHarvestGross: lastItem?.gross || 0,
+                lastHarvestRef: lastItem?.harvest.reference || null
+            };
+            if (!harvestedThisMonth)
+                unharvested.push(summary);
+            if (isNewThisMonth)
+                newThisMonth.push(summary);
+        }
+        // Sort unharvested so high-earning vendos from last month appear first
+        unharvested.sort((a, b) => (b.lastHarvestGross || 0) - (a.lastHarvestGross || 0));
+        res.json({
+            month: monthStr,
+            totalActive: vendos.length,
+            harvestedCount,
+            unharvestedCount: unharvested.length,
+            newThisMonthCount: newThisMonth.length,
+            unharvested,
+            newThisMonth
+        });
+    }
+    catch (e) {
+        res.status(500).json({ error: e.message });
+    }
+});
+app.post("/api/vendos", auth, requirePerm("manageVendos"), async (req, res) => {
     const p = zod_1.z.object({
-        vlanId: zod_1.z.coerce.number().int().positive(),
+        ipAddress: zod_1.z.string().trim().optional().nullable(),
+        vlanId: zod_1.z.preprocess(v => (v === "" || v === null || v === undefined ? null : v), zod_1.z.coerce.number().int().positive().nullable()).optional(),
         name: zod_1.z.string().trim().min(1),
         barangayId: zod_1.z.string().optional().nullable(),
         ownerId: zod_1.z.string().optional().nullable(),
@@ -304,24 +538,34 @@ app.post("/api/vendos", auth, allow(...adminRoles), async (req, res) => {
     }).safeParse(req.body);
     if (!p.success)
         return res.status(400).json({ error: "Invalid vendo data", details: p.error.flatten() });
+    const ip = p.data.ipAddress ? p.data.ipAddress.trim() : null;
+    const vlan = p.data.vlanId ?? null;
+    if (!ip && !vlan)
+        return res.status(400).json({ error: "Please provide an IP Address (or VLAN ID)" });
     try {
         const defaults = await getRevenueShareSettings();
         const data = {
-            ...p.data,
+            ipAddress: ip,
+            vlanId: vlan,
+            name: p.data.name,
+            notes: p.data.notes,
             ownerPercent: p.data.ownerPercent !== undefined ? p.data.ownerPercent : defaults.ownerPercent,
             barangayId: p.data.barangayId ? p.data.barangayId : null,
             ownerId: p.data.ownerId ? p.data.ownerId : null,
         };
-        res.status(201).json(await prisma.vendo.create({ data }));
+        res.status(201).json(await prisma.vendo.create({ data, include: { barangay: { include: { municipality: true } }, owner: true } }));
     }
-    catch {
-        res.status(409).json({ error: "VLAN ID already exists or related record is invalid" });
+    catch (e) {
+        if (e.code === "P2002")
+            return res.status(409).json({ error: "IP Address or VLAN ID already exists" });
+        res.status(400).json({ error: e.message || "Could not create vendo" });
     }
 });
-app.put("/api/vendos/:id", auth, allow(...adminRoles), async (req, res) => {
+app.put("/api/vendos/:id", auth, requirePerm("manageVendos"), async (req, res) => {
     const id = req.params.id;
     const p = zod_1.z.object({
-        vlanId: zod_1.z.coerce.number().int().positive().optional(),
+        ipAddress: zod_1.z.string().trim().optional().nullable(),
+        vlanId: zod_1.z.preprocess(v => (v === "" || v === null || v === undefined ? null : v), zod_1.z.coerce.number().int().positive().nullable()).optional(),
         name: zod_1.z.string().trim().min(1).optional(),
         barangayId: zod_1.z.string().optional().nullable(),
         ownerId: zod_1.z.string().optional().nullable(),
@@ -332,18 +576,22 @@ app.put("/api/vendos/:id", auth, allow(...adminRoles), async (req, res) => {
     if (!p.success)
         return res.status(400).json({ error: "Invalid vendo update data" });
     try {
-        const data = {
-            ...p.data,
-            barangayId: p.data.barangayId === "" ? null : p.data.barangayId,
-            ownerId: p.data.ownerId === "" ? null : p.data.ownerId
-        };
+        const data = { ...p.data };
+        if (p.data.ipAddress !== undefined)
+            data.ipAddress = p.data.ipAddress ? p.data.ipAddress.trim() : null;
+        if (p.data.barangayId === "")
+            data.barangayId = null;
+        if (p.data.ownerId === "")
+            data.ownerId = null;
         res.json(await prisma.vendo.update({ where: { id }, data, include: { barangay: { include: { municipality: true } }, owner: true } }));
     }
     catch (e) {
+        if (e.code === "P2002")
+            return res.status(409).json({ error: "IP Address or VLAN ID already exists" });
         res.status(400).json({ error: e.message });
     }
 });
-app.delete("/api/vendos/:id", auth, allow(...adminRoles), async (req, res) => {
+app.delete("/api/vendos/:id", auth, requirePerm("manageVendos"), async (req, res) => {
     const id = req.params.id;
     try {
         const count = await prisma.harvestItem.count({ where: { vendoId: id } });
@@ -360,20 +608,31 @@ app.delete("/api/vendos/:id", auth, allow(...adminRoles), async (req, res) => {
 });
 // Harvesting Teams
 app.get("/api/teams", auth, async (_req, res) => res.json(await prisma.harvestTeam.findMany({ include: { _count: { select: { harvests: true } } }, orderBy: { name: "asc" } })));
-app.post("/api/teams", auth, allow(...adminRoles), async (req, res) => {
-    const p = zod_1.z.object({ name: zod_1.z.string().trim().min(1), leader: zod_1.z.string().optional() }).safeParse(req.body);
+app.post("/api/teams", auth, requirePerm("manageTeams"), async (req, res) => {
+    const p = zod_1.z.object({
+        name: zod_1.z.string().trim().min(1),
+        leader: zod_1.z.string().optional(),
+        employeePercent: zod_1.z.preprocess(v => (v === "" || v === null || v === undefined ? null : v), zod_1.z.coerce.number().int().min(0).max(100).nullable()).optional()
+    }).safeParse(req.body);
     if (!p.success)
         return res.status(400).json({ error: "Team name is required" });
     try {
         res.status(201).json(await prisma.harvestTeam.create({ data: p.data }));
     }
-    catch {
-        res.status(409).json({ error: "Team already exists" });
+    catch (e) {
+        if (e.code === "P2002")
+            return res.status(409).json({ error: "Team name already exists" });
+        res.status(400).json({ error: e.message });
     }
 });
-app.put("/api/teams/:id", auth, allow(...adminRoles), async (req, res) => {
+app.put("/api/teams/:id", auth, requirePerm("manageTeams"), async (req, res) => {
     const id = req.params.id;
-    const p = zod_1.z.object({ name: zod_1.z.string().trim().min(1), leader: zod_1.z.string().optional().nullable(), status: zod_1.z.nativeEnum(client_1.Status).optional() }).safeParse(req.body);
+    const p = zod_1.z.object({
+        name: zod_1.z.string().trim().min(1),
+        leader: zod_1.z.string().optional().nullable(),
+        employeePercent: zod_1.z.preprocess(v => (v === "" || v === null || v === undefined ? null : v), zod_1.z.coerce.number().int().min(0).max(100).nullable()).optional(),
+        status: zod_1.z.nativeEnum(client_1.Status).optional()
+    }).safeParse(req.body);
     if (!p.success)
         return res.status(400).json({ error: "Invalid team data" });
     try {
@@ -383,7 +642,7 @@ app.put("/api/teams/:id", auth, allow(...adminRoles), async (req, res) => {
         res.status(400).json({ error: e.message });
     }
 });
-app.delete("/api/teams/:id", auth, allow(...adminRoles), async (req, res) => {
+app.delete("/api/teams/:id", auth, requirePerm("manageTeams"), async (req, res) => {
     const id = req.params.id;
     try {
         const count = await prisma.harvest.count({ where: { teamId: id } });
@@ -399,48 +658,99 @@ app.delete("/api/teams/:id", auth, allow(...adminRoles), async (req, res) => {
     }
 });
 // Users
-app.get("/api/users", auth, allow(...adminRoles), async (_req, res) => res.json(await prisma.user.findMany({ select: { id: true, name: true, email: true, role: true, status: true, createdAt: true }, orderBy: { name: "asc" } })));
-app.post("/api/users", auth, allow(client_1.Role.SUPER_ADMIN), async (req, res) => {
-    const p = zod_1.z.object({ name: zod_1.z.string().min(1), email: zod_1.z.string().email(), password: zod_1.z.string().min(8), role: zod_1.z.nativeEnum(client_1.Role) }).safeParse(req.body);
-    if (!p.success)
-        return res.status(400).json({ error: "Invalid user data; password must be at least 8 characters" });
-    try {
-        const u = await prisma.user.create({ data: { ...p.data, passwordHash: await bcryptjs_1.default.hash(p.data.password, 12) }, select: { id: true, name: true, email: true, role: true } });
-        res.status(201).json(u);
-    }
-    catch {
-        res.status(409).json({ error: "Email already exists" });
-    }
+app.get("/api/users", auth, async (req, res) => {
+    const canList = req.user.role === client_1.Role.SUPER_ADMIN || req.user.permissions?.manageUsers || financeRoles.includes(req.user.role);
+    if (!canList)
+        return res.status(403).json({ error: "Insufficient permissions" });
+    const users = await prisma.user.findMany({
+        select: { id: true, name: true, email: true, role: true, permissions: true, status: true, createdAt: true },
+        orderBy: { name: "asc" }
+    });
+    res.json(users.map(u => ({ ...u, resolvedPermissions: resolvePermissions(u.role, u.permissions) })));
 });
-app.put("/api/users/:id", auth, allow(client_1.Role.SUPER_ADMIN), async (req, res) => {
-    const id = req.params.id;
+app.post("/api/users", auth, requirePerm("manageUsers"), async (req, res) => {
     const p = zod_1.z.object({
-        name: zod_1.z.string().min(1).optional(),
-        role: zod_1.z.nativeEnum(client_1.Role).optional(),
-        status: zod_1.z.nativeEnum(client_1.Status).optional(),
-        password: zod_1.z.string().min(8).optional()
+        name: zod_1.z.string().trim().min(1),
+        email: zod_1.z.string().trim().email(),
+        password: zod_1.z.string().min(8),
+        role: zod_1.z.nativeEnum(client_1.Role),
+        permissions: zod_1.z.record(zod_1.z.boolean()).optional().nullable()
     }).safeParse(req.body);
     if (!p.success)
-        return res.status(400).json({ error: "Invalid user update data" });
+        return res.status(400).json({ error: "Invalid user data; valid email and password (min 8 chars) required" });
+    if (p.data.role === client_1.Role.SUPER_ADMIN && req.user.role !== client_1.Role.SUPER_ADMIN) {
+        return res.status(403).json({ error: "Only SUPER_ADMIN can create another SUPER_ADMIN" });
+    }
+    const emailLower = p.data.email.toLowerCase();
     try {
+        const existing = await prisma.user.findFirst({ where: { email: { equals: emailLower, mode: "insensitive" } } });
+        if (existing)
+            return res.status(409).json({ error: "Email already exists" });
+        const u = await prisma.user.create({
+            data: {
+                name: p.data.name,
+                email: emailLower,
+                passwordHash: await bcryptjs_1.default.hash(p.data.password, 12),
+                role: p.data.role,
+                permissions: p.data.permissions ?? undefined
+            },
+            select: { id: true, name: true, email: true, role: true, permissions: true, status: true }
+        });
+        res.status(201).json(u);
+    }
+    catch (e) {
+        if (e.code === "P2002")
+            return res.status(409).json({ error: "Email already exists" });
+        res.status(400).json({ error: e.message || "Could not create user" });
+    }
+});
+app.put("/api/users/:id", auth, requirePerm("manageUsers"), async (req, res) => {
+    const id = req.params.id;
+    const p = zod_1.z.object({
+        name: zod_1.z.string().trim().min(1).optional(),
+        email: zod_1.z.string().trim().email().optional(),
+        role: zod_1.z.nativeEnum(client_1.Role).optional(),
+        status: zod_1.z.nativeEnum(client_1.Status).optional(),
+        password: zod_1.z.string().min(8).optional(),
+        permissions: zod_1.z.record(zod_1.z.boolean()).optional().nullable()
+    }).safeParse(req.body);
+    if (!p.success)
+        return res.status(400).json({ error: "Invalid user update data (password must be at least 8 characters if provided)" });
+    try {
+        const target = await prisma.user.findUnique({ where: { id } });
+        if (!target)
+            return res.status(404).json({ error: "User not found" });
+        if (target.role === client_1.Role.SUPER_ADMIN && req.user.role !== client_1.Role.SUPER_ADMIN) {
+            return res.status(403).json({ error: "Only SUPER_ADMIN can modify a SUPER_ADMIN account" });
+        }
         const updateData = {};
         if (p.data.name)
             updateData.name = p.data.name;
+        if (p.data.email)
+            updateData.email = p.data.email.toLowerCase();
         if (p.data.role)
             updateData.role = p.data.role;
         if (p.data.status)
             updateData.status = p.data.status;
         if (p.data.password)
             updateData.passwordHash = await bcryptjs_1.default.hash(p.data.password, 12);
-        const u = await prisma.user.update({ where: { id }, data: updateData, select: { id: true, name: true, email: true, role: true, status: true } });
+        if (p.data.permissions !== undefined)
+            updateData.permissions = p.data.permissions;
+        const u = await prisma.user.update({
+            where: { id },
+            data: updateData,
+            select: { id: true, name: true, email: true, role: true, permissions: true, status: true }
+        });
         res.json(u);
     }
     catch (e) {
+        if (e.code === "P2002")
+            return res.status(409).json({ error: "Email already exists" });
         res.status(400).json({ error: e.message });
     }
 });
 // Harvesting
-app.post("/api/harvests", auth, async (req, res) => {
+app.post("/api/harvests", auth, requirePerm("encodeHarvest"), async (req, res) => {
     const p = zod_1.z.object({
         harvestedAt: zod_1.z.union([zod_1.z.string().datetime(), zod_1.z.string().min(1), zod_1.z.date()]),
         teamId: zod_1.z.string().optional().nullable(),
@@ -477,7 +787,7 @@ app.post("/api/harvests", auth, async (req, res) => {
                             pesos(gross);
                             return { vendoId: i.vendoId, gross,
                                 coinCounts: { create: i.coins.map(c => ({ ...c, amount: c.denomination * c.quantity })) },
-                                expenses: { create: i.expenses.map(e => ({ ...e, status: client_1.ExpenseStatus.PENDING })) }
+                                expenses: { create: i.expenses.map(e => ({ ...e, encoderId: req.user.id, incurredAt: harvestDate, status: client_1.ExpenseStatus.PENDING })) }
                             };
                         }) }
                 }, include: { items: { include: { vendo: true, expenses: true, coinCounts: true } }, team: true } });
@@ -488,26 +798,100 @@ app.post("/api/harvests", auth, async (req, res) => {
         res.status(400).json({ error: e.message || "Could not create harvest" });
     }
 });
+app.put("/api/harvests/:id", auth, requirePerm("editHarvest"), async (req, res) => {
+    const id = req.params.id;
+    const p = zod_1.z.object({
+        harvestedAt: zod_1.z.union([zod_1.z.string().datetime(), zod_1.z.string().min(1), zod_1.z.date()]).optional(),
+        teamId: zod_1.z.string().optional().nullable(),
+        remarks: zod_1.z.string().optional().nullable(),
+        gross: zod_1.z.number().int().nonnegative().optional()
+    }).safeParse(req.body);
+    if (!p.success)
+        return res.status(400).json({ error: "Invalid harvest update data" });
+    try {
+        const h = await prisma.harvest.findUnique({ where: { id }, include: { items: true } });
+        if (!h)
+            return res.status(404).json({ error: "Harvest not found" });
+        if (h.status === client_1.HarvestStatus.APPROVED)
+            return res.status(400).json({ error: "Approved harvests cannot be edited directly" });
+        const updateData = {};
+        if (p.data.harvestedAt) {
+            const dt = new Date(p.data.harvestedAt);
+            if (isNaN(dt.getTime()))
+                throw new Error("Invalid harvest date");
+            updateData.harvestedAt = dt;
+        }
+        if (p.data.teamId !== undefined)
+            updateData.teamId = p.data.teamId || null;
+        if (p.data.remarks !== undefined)
+            updateData.remarks = p.data.remarks;
+        await prisma.$transaction(async (tx) => {
+            await tx.harvest.update({ where: { id }, data: updateData });
+            if (p.data.gross !== undefined && h.items.length === 1) {
+                pesos(p.data.gross);
+                await tx.harvestItem.update({ where: { id: h.items[0].id }, data: { gross: p.data.gross } });
+            }
+        });
+        res.json({ status: "updated" });
+    }
+    catch (e) {
+        res.status(400).json({ error: e.message });
+    }
+});
 app.get("/api/harvests", auth, async (req, res) => {
     const from = req.query.from && !isNaN(Date.parse(String(req.query.from))) ? new Date(String(req.query.from)) : new Date("2000-01-01");
-    const to = req.query.to && !isNaN(Date.parse(String(req.query.to))) ? new Date(String(req.query.to)) : new Date("2099-12-31");
-    const rows = await prisma.harvest.findMany({
-        where: { harvestedAt: { gte: from, lte: to } },
-        include: {
-            team: true,
-            encoder: { select: { id: true, name: true, email: true } },
-            items: { include: { vendo: { include: { barangay: { include: { municipality: true } } } }, expenses: true, distribution: { include: { allocations: true } } } }
-        },
-        orderBy: { harvestedAt: "desc" }
+    const to = req.query.to && !isNaN(Date.parse(String(req.query.to)))
+        ? (String(req.query.to).length === 10 ? new Date(String(req.query.to) + "T23:59:59.999Z") : new Date(String(req.query.to)))
+        : new Date("2099-12-31");
+    const teamId = req.query.teamId ? String(req.query.teamId) : "";
+    const municipalityId = req.query.municipalityId ? String(req.query.municipalityId) : "";
+    const where = { harvestedAt: { gte: from, lte: to } };
+    if (teamId)
+        where.teamId = teamId;
+    if (municipalityId) {
+        where.items = { some: { vendo: { barangay: { municipalityId } } } };
+    }
+    const [rows, allFirstItems] = await Promise.all([
+        prisma.harvest.findMany({
+            where,
+            include: {
+                team: true,
+                encoder: { select: { id: true, name: true, email: true } },
+                items: { include: { vendo: { include: { barangay: { include: { municipality: true } } } }, expenses: true, distribution: { include: { allocations: true } } } }
+            },
+            orderBy: { harvestedAt: "desc" }
+        }),
+        prisma.harvestItem.findMany({
+            where: { harvest: { status: { not: client_1.HarvestStatus.REJECTED } } },
+            select: { vendoId: true, harvest: { select: { harvestedAt: true } } },
+            orderBy: { harvest: { harvestedAt: "asc" } }
+        })
+    ]);
+    const firstMonthByVendo = new Map();
+    for (const it of allFirstItems) {
+        if (!firstMonthByVendo.has(it.vendoId)) {
+            const d = it.harvest.harvestedAt;
+            firstMonthByVendo.set(it.vendoId, `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`);
+        }
+    }
+    const annotated = rows.map(h => {
+        const hm = `${h.harvestedAt.getFullYear()}-${String(h.harvestedAt.getMonth() + 1).padStart(2, "0")}`;
+        return {
+            ...h,
+            items: h.items.map(i => ({
+                ...i,
+                isNewVendoThisMonth: firstMonthByVendo.get(i.vendoId) === hm
+            }))
+        };
     });
-    res.json(rows);
+    res.json(annotated);
 });
-app.post("/api/harvests/:id/approve", auth, allow(...financeRoles), async (req, res) => {
+app.post("/api/harvests/:id/approve", auth, requirePerm("approveHarvest"), async (req, res) => {
     try {
         const id = req.params.id;
         const sysSettings = await getRevenueShareSettings();
         const result = await prisma.$transaction(async (tx) => {
-            const h = await tx.harvest.findUnique({ where: { id }, include: { items: { include: { expenses: true, vendo: true } } } });
+            const h = await tx.harvest.findUnique({ where: { id }, include: { team: true, items: { include: { expenses: true, vendo: true } } } });
             if (!h)
                 throw new Error("Harvest not found");
             if (h.status === client_1.HarvestStatus.APPROVED)
@@ -521,10 +905,12 @@ app.post("/api/harvests/:id/approve", auth, allow(...financeRoles), async (req, 
                     await tx.expense.updateMany({ where: { id: { in: pending.map((e) => e.id) } }, data: { status: client_1.ExpenseStatus.APPROVED } });
                 const approvedExpenses = item.expenses.filter((e) => e.status === client_1.ExpenseStatus.APPROVED || e.status === client_1.ExpenseStatus.PENDING).reduce((s, e) => s + e.amount, 0);
                 const net = item.gross - approvedExpenses;
+                const label = item.vendo.ipAddress || (item.vendo.vlanId ? `VLAN ${item.vendo.vlanId}` : item.vendo.name);
                 if (net < 0)
-                    throw new Error(`Expenses exceed gross collection for VLAN ${item.vendo.vlanId}`);
-                const ownerPercent = req.body?.ownerPercent !== undefined ? Number(req.body.ownerPercent) : (item.vendo.ownerPercent || sysSettings.ownerPercent);
-                const employeePercent = req.body?.employeePercent !== undefined ? Number(req.body.employeePercent) : sysSettings.employeePercent;
+                    throw new Error(`Expenses exceed gross collection for ${label}`);
+                const ownerPercent = req.body?.ownerPercent !== undefined ? Number(req.body.ownerPercent) : (item.vendo.ownerPercent ?? sysSettings.ownerPercent);
+                const teamPercent = h.team?.employeePercent !== null && h.team?.employeePercent !== undefined ? h.team.employeePercent : sysSettings.employeePercent;
+                const employeePercent = req.body?.employeePercent !== undefined ? Number(req.body.employeePercent) : teamPercent;
                 const ownerExact = net * ownerPercent / 100;
                 const ownerShare = roundPeso(ownerExact);
                 const remaining = net - ownerShare;
@@ -545,7 +931,7 @@ app.post("/api/harvests/:id/approve", auth, allow(...financeRoles), async (req, 
         res.status(400).json({ error: e.message });
     }
 });
-app.post("/api/harvests/:id/reject", auth, allow(...financeRoles), async (req, res) => {
+app.post("/api/harvests/:id/reject", auth, requirePerm("approveHarvest"), async (req, res) => {
     try {
         const id = req.params.id;
         const h = await prisma.harvest.findUnique({ where: { id } });
@@ -563,23 +949,184 @@ app.post("/api/harvests/:id/reject", auth, allow(...financeRoles), async (req, r
         res.status(400).json({ error: e.message });
     }
 });
-// Expenses
-app.post("/api/expenses/:id/approve", auth, allow(...financeRoles), async (req, res) => {
+// Expenses (both harvest-linked and standalone per-municipality)
+app.get("/api/expenses", auth, async (req, res) => {
+    const municipalityId = req.query.municipalityId ? String(req.query.municipalityId) : "";
+    const status = req.query.status ? String(req.query.status) : "";
+    const where = {};
+    if (status && status !== "ALL")
+        where.status = status;
+    if (municipalityId) {
+        where.OR = [
+            { municipalityId },
+            { harvestItem: { vendo: { barangay: { municipalityId } } } }
+        ];
+    }
+    const rows = await prisma.expense.findMany({
+        where,
+        include: {
+            municipality: true,
+            encoder: { select: { id: true, name: true } },
+            harvestItem: {
+                include: {
+                    harvest: { select: { id: true, reference: true, harvestedAt: true } },
+                    vendo: { include: { barangay: { include: { municipality: true } } } }
+                }
+            }
+        },
+        orderBy: [{ incurredAt: "desc" }, { createdAt: "desc" }]
+    });
+    res.json(rows);
+});
+app.post("/api/expenses", auth, requirePerm("manageExpenses"), async (req, res) => {
+    const p = zod_1.z.object({
+        municipalityId: zod_1.z.string().min(1, "Municipality is required"),
+        category: zod_1.z.string().trim().min(1),
+        description: zod_1.z.string().optional(),
+        amount: zod_1.z.coerce.number().int().positive(),
+        incurredAt: zod_1.z.union([zod_1.z.string().datetime(), zod_1.z.string().min(1), zod_1.z.date()]).optional()
+    }).safeParse(req.body);
+    if (!p.success)
+        return res.status(400).json({ error: "Invalid expense data (municipality, category, and whole-peso amount required)" });
+    try {
+        const dt = p.data.incurredAt ? new Date(p.data.incurredAt) : new Date();
+        if (isNaN(dt.getTime()))
+            return res.status(400).json({ error: "Invalid expense date" });
+        const created = await prisma.expense.create({
+            data: {
+                municipalityId: p.data.municipalityId,
+                encoderId: req.user.id,
+                category: p.data.category,
+                description: p.data.description || null,
+                amount: p.data.amount,
+                incurredAt: dt,
+                status: client_1.ExpenseStatus.PENDING
+            },
+            include: { municipality: true, encoder: { select: { id: true, name: true } } }
+        });
+        res.status(201).json(created);
+    }
+    catch (e) {
+        res.status(400).json({ error: e.message });
+    }
+});
+app.post("/api/expenses/:id/approve", auth, requirePerm("approveHarvest"), async (req, res) => {
     const id = req.params.id;
     const expense = await prisma.expense.update({ where: { id }, data: { status: client_1.ExpenseStatus.APPROVED } });
     res.json(expense);
 });
-app.post("/api/expenses/:id/reject", auth, allow(...financeRoles), async (req, res) => {
+app.post("/api/expenses/:id/reject", auth, requirePerm("approveHarvest"), async (req, res) => {
     const id = req.params.id;
     const expense = await prisma.expense.update({ where: { id }, data: { status: client_1.ExpenseStatus.REJECTED } });
     res.json(expense);
 });
+// Remittances / Cash Outflow (Deposits & Owner Remits with Slip Photo)
+app.get("/api/remittances", auth, async (req, res) => {
+    const from = req.query.from && !isNaN(Date.parse(String(req.query.from))) ? new Date(String(req.query.from)) : new Date("2000-01-01");
+    const to = req.query.to && !isNaN(Date.parse(String(req.query.to)))
+        ? (String(req.query.to).length === 10 ? new Date(String(req.query.to) + "T23:59:59.999Z") : new Date(String(req.query.to)))
+        : new Date("2099-12-31");
+    const municipalityId = req.query.municipalityId ? String(req.query.municipalityId) : "";
+    const teamId = req.query.teamId ? String(req.query.teamId) : "";
+    const type = req.query.type ? String(req.query.type) : "";
+    const where = { remittedAt: { gte: from, lte: to } };
+    if (municipalityId)
+        where.municipalityId = municipalityId;
+    if (teamId)
+        where.teamId = teamId;
+    if (type && (type === client_1.RemittanceType.BANK_DEPOSIT || type === client_1.RemittanceType.REMIT_TO_OWNER))
+        where.type = type;
+    const rows = await prisma.remittance.findMany({
+        where,
+        include: {
+            municipality: true,
+            team: true,
+            recordedBy: { select: { id: true, name: true } }
+        },
+        orderBy: { remittedAt: "desc" }
+    });
+    res.json(rows);
+});
+app.post("/api/remittances", auth, requirePerm("manageRemittances"), async (req, res) => {
+    const p = zod_1.z.object({
+        type: zod_1.z.nativeEnum(client_1.RemittanceType),
+        amount: zod_1.z.coerce.number().int().positive(),
+        remittedAt: zod_1.z.union([zod_1.z.string().datetime(), zod_1.z.string().min(1), zod_1.z.date()]),
+        municipalityId: zod_1.z.string().optional().nullable(),
+        teamId: zod_1.z.string().optional().nullable(),
+        bankOrChannel: zod_1.z.string().optional().nullable(),
+        notes: zod_1.z.string().optional().nullable(),
+        slipImage: zod_1.z.string().max(4_000_000).optional().nullable()
+    }).safeParse(req.body);
+    if (!p.success)
+        return res.status(400).json({ error: "Invalid remittance data (type, whole-peso amount, and date required)" });
+    try {
+        const dt = new Date(p.data.remittedAt);
+        if (isNaN(dt.getTime()))
+            return res.status(400).json({ error: "Invalid remittance date" });
+        const reference = `R-${Date.now()}-${Math.floor(Math.random() * 1000).toString().padStart(3, "0")}`;
+        const created = await prisma.remittance.create({
+            data: {
+                reference,
+                type: p.data.type,
+                amount: p.data.amount,
+                remittedAt: dt,
+                municipalityId: p.data.municipalityId || null,
+                teamId: p.data.teamId || null,
+                recordedById: req.user.id,
+                bankOrChannel: p.data.bankOrChannel || null,
+                notes: p.data.notes || null,
+                slipImage: p.data.slipImage || null
+            },
+            include: { municipality: true, team: true, recordedBy: { select: { id: true, name: true } } }
+        });
+        res.status(201).json(created);
+    }
+    catch (e) {
+        res.status(400).json({ error: e.message });
+    }
+});
+app.delete("/api/remittances/:id", auth, allow(...financeRoles), async (req, res) => {
+    const id = req.params.id;
+    try {
+        await prisma.remittance.delete({ where: { id } });
+        res.json({ status: "deleted" });
+    }
+    catch (e) {
+        res.status(400).json({ error: e.message });
+    }
+});
 // Dashboard & Analytics
 app.get("/api/dashboard", auth, async (req, res) => {
-    const from = req.query.from && !isNaN(Date.parse(String(req.query.from))) ? new Date(String(req.query.from)) : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-    const to = req.query.to && !isNaN(Date.parse(String(req.query.to))) ? new Date(String(req.query.to)) : new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0, 23, 59, 59, 999);
-    const harvests = await prisma.harvest.findMany({ where: { harvestedAt: { gte: from, lte: to }, status: client_1.HarvestStatus.APPROVED }, include: { items: { include: { distribution: true, vendo: { include: { barangay: { include: { municipality: true } } } } } } } });
-    const totals = harvests.flatMap(h => h.items).reduce((a, i) => {
+    const from = req.query.from && !isNaN(Date.parse(String(req.query.from)))
+        ? new Date(String(req.query.from))
+        : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+    const to = req.query.to && !isNaN(Date.parse(String(req.query.to)))
+        ? (String(req.query.to).length === 10 ? new Date(String(req.query.to) + "T23:59:59.999Z") : new Date(String(req.query.to)))
+        : new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0, 23, 59, 59, 999);
+    const municipalityId = req.query.municipalityId ? String(req.query.municipalityId) : "";
+    const teamId = req.query.teamId ? String(req.query.teamId) : "";
+    const harvestWhere = { harvestedAt: { gte: from, lte: to }, status: client_1.HarvestStatus.APPROVED };
+    if (teamId)
+        harvestWhere.teamId = teamId;
+    const harvests = await prisma.harvest.findMany({
+        where: harvestWhere,
+        include: {
+            team: true,
+            items: {
+                include: {
+                    distribution: true,
+                    vendo: { include: { barangay: { include: { municipality: true } } } }
+                }
+            }
+        }
+    });
+    const filteredItems = harvests.flatMap(h => h.items).filter(i => {
+        if (municipalityId && i.vendo?.barangay?.municipalityId !== municipalityId)
+            return false;
+        return true;
+    });
+    const totals = filteredItems.reduce((a, i) => {
         const d = i.distribution;
         a.gross += i.gross;
         a.expenses += d?.approvedExpenses || 0;
@@ -588,19 +1135,64 @@ app.get("/api/dashboard", auth, async (req, res) => {
         a.company += d?.companyShare || 0;
         return a;
     }, { gross: 0, expenses: 0, owner: 0, employee: 0, company: 0 });
+    // Include standalone approved municipality expenses in period (unless filtered strictly by teamId)
+    let standaloneExpenses = 0;
+    if (!teamId) {
+        const expWhere = {
+            harvestItemId: null,
+            status: client_1.ExpenseStatus.APPROVED,
+            incurredAt: { gte: from, lte: to }
+        };
+        if (municipalityId)
+            expWhere.municipalityId = municipalityId;
+        const standalone = await prisma.expense.aggregate({ where: expWhere, _sum: { amount: true } });
+        standaloneExpenses = standalone._sum.amount || 0;
+    }
+    const remWhere = { remittedAt: { gte: from, lte: to } };
+    if (municipalityId)
+        remWhere.municipalityId = municipalityId;
+    if (teamId)
+        remWhere.teamId = teamId;
+    const remAgg = await prisma.remittance.aggregate({ where: remWhere, _sum: { amount: true } });
+    const remittedTotal = remAgg._sum.amount || 0;
+    const vendoCountWhere = { status: client_1.Status.ACTIVE };
+    if (municipalityId)
+        vendoCountWhere.barangay = { municipalityId };
     const [vendos, municipalities, pending] = await Promise.all([
-        prisma.vendo.count({ where: { status: client_1.Status.ACTIVE } }),
+        prisma.vendo.count({ where: vendoCountWhere }),
         prisma.municipality.count(),
         prisma.harvest.count({ where: { status: client_1.HarvestStatus.SUBMITTED } })
     ]);
-    res.json({ ...totals, net: totals.gross - totals.expenses, vendos, municipalities, pendingHarvests: pending, approvedHarvests: harvests.length });
+    const totalExpenses = totals.expenses + standaloneExpenses;
+    const net = totals.gross - totalExpenses;
+    const companyAfterStandalone = Math.max(0, totals.company - standaloneExpenses);
+    res.json({
+        ...totals,
+        expenses: totalExpenses,
+        standaloneExpenses,
+        company: companyAfterStandalone,
+        net,
+        remittedTotal,
+        cashRemaining: net - remittedTotal,
+        vendos,
+        municipalities,
+        pendingHarvests: pending,
+        approvedHarvests: harvests.length
+    });
 });
-// Reports breakdown
+// Reports breakdown (Per Vendo, Per Municipality, Per Harvester/Team)
 app.get("/api/reports/detailed", auth, async (req, res) => {
     const from = req.query.from && !isNaN(Date.parse(String(req.query.from))) ? new Date(String(req.query.from)) : new Date("2000-01-01");
-    const to = req.query.to && !isNaN(Date.parse(String(req.query.to))) ? new Date(String(req.query.to)) : new Date("2099-12-31");
+    const to = req.query.to && !isNaN(Date.parse(String(req.query.to)))
+        ? (String(req.query.to).length === 10 ? new Date(String(req.query.to) + "T23:59:59.999Z") : new Date(String(req.query.to)))
+        : new Date("2099-12-31");
+    const municipalityId = req.query.municipalityId ? String(req.query.municipalityId) : "";
+    const teamId = req.query.teamId ? String(req.query.teamId) : "";
+    const harvestWhere = { harvestedAt: { gte: from, lte: to }, status: client_1.HarvestStatus.APPROVED };
+    if (teamId)
+        harvestWhere.teamId = teamId;
     const harvests = await prisma.harvest.findMany({
-        where: { harvestedAt: { gte: from, lte: to }, status: client_1.HarvestStatus.APPROVED },
+        where: harvestWhere,
         include: {
             team: true,
             items: {
@@ -614,38 +1206,134 @@ app.get("/api/reports/detailed", auth, async (req, res) => {
         orderBy: { harvestedAt: "asc" }
     });
     const byVendo = {};
+    const byMunicipality = {};
+    const byHarvester = {};
+    const summary = { gross: 0, expenses: 0, standaloneExpenses: 0, net: 0, ownerShare: 0, employeePool: 0, companyShare: 0, remittedTotal: 0 };
     for (const h of harvests) {
+        const tId = h.teamId || "unassigned";
+        const tName = h.team?.name || "Unassigned Team";
+        const tLeader = h.team?.leader || "—";
         for (const item of h.items) {
             const v = item.vendo;
-            const key = v.id;
-            if (!byVendo[key]) {
-                byVendo[key] = {
+            const mId = v.barangay?.municipalityId || "unassigned";
+            const mName = v.barangay?.municipality?.name || "Unassigned Area";
+            if (municipalityId && mId !== municipalityId)
+                continue;
+            const gross = item.gross;
+            const exp = item.distribution?.approvedExpenses || 0;
+            const net = item.distribution?.netAfterExpenses ?? (gross - exp);
+            const ownerShare = item.distribution?.ownerShare || 0;
+            const employeePool = item.distribution?.employeePool || 0;
+            const companyShare = item.distribution?.companyShare || 0;
+            summary.gross += gross;
+            summary.expenses += exp;
+            summary.net += net;
+            summary.ownerShare += ownerShare;
+            summary.employeePool += employeePool;
+            summary.companyShare += companyShare;
+            if (!byVendo[v.id]) {
+                byVendo[v.id] = {
                     vendoId: v.id,
+                    ipAddress: v.ipAddress || "—",
                     vlanId: v.vlanId,
                     name: v.name,
-                    location: `${v.barangay?.name || "—"}, ${v.barangay?.municipality?.name || "—"}`,
+                    municipalityId: mId,
+                    municipalityName: mName,
+                    location: `${v.barangay?.name || "—"}, ${mName}`,
                     ownerName: v.owner?.name || "—",
                     harvestCount: 0,
-                    gross: 0,
-                    expenses: 0,
-                    net: 0,
-                    ownerShare: 0,
-                    employeePool: 0,
-                    companyShare: 0
+                    gross: 0, expenses: 0, net: 0, ownerShare: 0, employeePool: 0, companyShare: 0
                 };
             }
-            byVendo[key].harvestCount++;
-            byVendo[key].gross += item.gross;
-            byVendo[key].expenses += item.distribution?.approvedExpenses || 0;
-            byVendo[key].net += item.distribution?.netAfterExpenses || 0;
-            byVendo[key].ownerShare += item.distribution?.ownerShare || 0;
-            byVendo[key].employeePool += item.distribution?.employeePool || 0;
-            byVendo[key].companyShare += item.distribution?.companyShare || 0;
+            byVendo[v.id].harvestCount++;
+            byVendo[v.id].gross += gross;
+            byVendo[v.id].expenses += exp;
+            byVendo[v.id].net += net;
+            byVendo[v.id].ownerShare += ownerShare;
+            byVendo[v.id].employeePool += employeePool;
+            byVendo[v.id].companyShare += companyShare;
+            if (!byMunicipality[mId]) {
+                byMunicipality[mId] = {
+                    municipalityId: mId,
+                    municipalityName: mName,
+                    harvestCount: 0,
+                    gross: 0, expenses: 0, standaloneExpenses: 0, net: 0, ownerShare: 0, employeePool: 0, companyShare: 0, remittedTotal: 0
+                };
+            }
+            byMunicipality[mId].harvestCount++;
+            byMunicipality[mId].gross += gross;
+            byMunicipality[mId].expenses += exp;
+            byMunicipality[mId].net += net;
+            byMunicipality[mId].ownerShare += ownerShare;
+            byMunicipality[mId].employeePool += employeePool;
+            byMunicipality[mId].companyShare += companyShare;
+            if (!byHarvester[tId]) {
+                byHarvester[tId] = {
+                    teamId: tId,
+                    teamName: tName,
+                    leader: tLeader,
+                    harvestCount: 0,
+                    gross: 0, expenses: 0, net: 0, ownerShare: 0, employeePool: 0, companyShare: 0, remittedTotal: 0
+                };
+            }
+            byHarvester[tId].harvestCount++;
+            byHarvester[tId].gross += gross;
+            byHarvester[tId].expenses += exp;
+            byHarvester[tId].net += net;
+            byHarvester[tId].ownerShare += ownerShare;
+            byHarvester[tId].employeePool += employeePool;
+            byHarvester[tId].companyShare += companyShare;
+        }
+    }
+    // Standalone municipality expenses
+    if (!teamId) {
+        const expWhere = { harvestItemId: null, status: client_1.ExpenseStatus.APPROVED, incurredAt: { gte: from, lte: to } };
+        if (municipalityId)
+            expWhere.municipalityId = municipalityId;
+        const standalone = await prisma.expense.findMany({ where: expWhere, include: { municipality: true } });
+        for (const se of standalone) {
+            const mId = se.municipalityId || "unassigned";
+            const mName = se.municipality?.name || "Unassigned Area";
+            summary.standaloneExpenses += se.amount;
+            summary.expenses += se.amount;
+            summary.net -= se.amount;
+            summary.companyShare = Math.max(0, summary.companyShare - se.amount);
+            if (!byMunicipality[mId]) {
+                byMunicipality[mId] = {
+                    municipalityId: mId,
+                    municipalityName: mName,
+                    harvestCount: 0,
+                    gross: 0, expenses: 0, standaloneExpenses: 0, net: 0, ownerShare: 0, employeePool: 0, companyShare: 0, remittedTotal: 0
+                };
+            }
+            byMunicipality[mId].standaloneExpenses += se.amount;
+            byMunicipality[mId].expenses += se.amount;
+            byMunicipality[mId].net -= se.amount;
+            byMunicipality[mId].companyShare = Math.max(0, byMunicipality[mId].companyShare - se.amount);
+        }
+    }
+    // Remittances per municipality & team
+    const remWhere = { remittedAt: { gte: from, lte: to } };
+    if (municipalityId)
+        remWhere.municipalityId = municipalityId;
+    if (teamId)
+        remWhere.teamId = teamId;
+    const remittances = await prisma.remittance.findMany({ where: remWhere });
+    for (const r of remittances) {
+        summary.remittedTotal += r.amount;
+        if (r.municipalityId && byMunicipality[r.municipalityId]) {
+            byMunicipality[r.municipalityId].remittedTotal += r.amount;
+        }
+        if (r.teamId && byHarvester[r.teamId]) {
+            byHarvester[r.teamId].remittedTotal += r.amount;
         }
     }
     res.json({
         period: { from, to },
+        summary,
         vendosSummary: Object.values(byVendo),
+        municipalitySummary: Object.values(byMunicipality),
+        harvesterSummary: Object.values(byHarvester),
         totalHarvests: harvests.length
     });
 });
