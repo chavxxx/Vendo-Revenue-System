@@ -32,9 +32,9 @@ fi
 echo "Syncing database schema..."
 if [ -d "api" ]; then
   if [ -x "api/node_modules/.bin/prisma" ]; then
-    (cd api && ./node_modules/.bin/prisma db push --skip-generate 2>/dev/null || true)
+    (cd api && ./node_modules/.bin/prisma db push --skip-generate --accept-data-loss 2>/dev/null || true)
   elif command -v npx >/dev/null 2>&1; then
-    (cd api && npx prisma db push --skip-generate 2>/dev/null || true)
+    (cd api && npx prisma db push --skip-generate --accept-data-loss 2>/dev/null || true)
   fi
 fi
 

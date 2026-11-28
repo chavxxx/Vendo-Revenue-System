@@ -16,4 +16,4 @@ COPY prisma ./prisma
 COPY version.json* ./dist/
 
 EXPOSE 3000
-CMD ["sh", "-c", "./node_modules/.bin/prisma generate && ./node_modules/.bin/prisma db push && node dist/server.js"]
+CMD ["sh", "-c", "./node_modules/.bin/prisma generate && ./node_modules/.bin/prisma db push --accept-data-loss && node dist/server.js"]

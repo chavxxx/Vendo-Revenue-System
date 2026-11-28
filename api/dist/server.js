@@ -1575,7 +1575,7 @@ app.post("/api/system/apply-update", auth, allow(client_1.Role.SUPER_ADMIN), asy
                     : fs_1.default.existsSync(`${projectRoot}/api/node_modules/.bin/prisma`)
                         ? `${projectRoot}/api/node_modules/.bin/prisma`
                         : "npx prisma";
-                (0, child_process_1.execSync)(`${prismaCmd} db push --skip-generate`, { timeout: 45000, stdio: "inherit" });
+                (0, child_process_1.execSync)(`${prismaCmd} db push --skip-generate --accept-data-loss`, { timeout: 45000, stdio: "inherit" });
                 console.log(`[Updater] Database schema sync completed.`);
             }
             catch (pErr) {
